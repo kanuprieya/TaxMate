@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+faiss-cpu
+sentence-transformers
+openai
+httpx
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
