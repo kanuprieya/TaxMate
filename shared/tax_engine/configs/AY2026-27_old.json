@@ -1,0 +1,42 @@
+{
+  "ay": "AY2026-27",
+  "regime": "old",
+  "steps": [
+    { "op": "aggregate_gross_income", "params": { "standard_deduction": 50000 } },
+    {
+      "op": "apply_deductions",
+      "params": {
+        "sec_80c_cap": 150000,
+        "sec_80ccd_1b_cap": 50000,
+        "sec_80d_cap": 25000,
+        "sec_80tta_cap": 10000,
+        "sec_80ttb_cap": 50000
+      }
+    },
+    { "op": "compute_taxable_income", "params": {} },
+    {
+      "op": "apply_slabs",
+      "params": {
+        "slabs": [
+          [250000, 0.00],
+          [500000, 0.05],
+          [1000000, 0.20],
+          [null, 0.30]
+        ]
+      }
+    },
+    { "op": "apply_rebate", "params": { "income_threshold": 500000, "max_rebate": 12500 } },
+    {
+      "op": "apply_surcharge",
+      "params": {
+        "tiers": [
+          [5000000, 0.10],
+          [10000000, 0.15],
+          [20000000, 0.25],
+          [50000000, 0.37]
+        ]
+      }
+    },
+    { "op": "apply_cess", "params": { "rate": 0.04 } }
+  ]
+}

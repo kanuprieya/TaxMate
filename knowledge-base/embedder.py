@@ -32,7 +32,7 @@ import numpy as np
 # ── Config ────────────────────────────────────────────────────────────────────
 CHUNKS_JSONL = Path(__file__).parent / "rag_output" / "combined" / "all_chunks.jsonl"
 VECTOR_STORE  = Path(__file__).parent / "vector_store"
-AY_NAMESPACE  = "AY2024-25"    # change per assessment year
+AY_NAMESPACE  = "AY2026-27"    # change per assessment year
 
 VECTOR_STORE.mkdir(exist_ok=True)
 

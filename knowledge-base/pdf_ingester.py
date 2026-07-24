@@ -299,7 +299,7 @@ def chunk_pdf_text(
 
 def ingest_pdf(
     pdf_path: Path,
-    ay:       str  = "AY2024-25",
+    ay:       str  = "AY2026-27",
     source_override: str = "",
 ) -> list[dict]:
     print(f"\n  Processing: {pdf_path.name}")
@@ -368,7 +368,7 @@ def main():
     parser.add_argument("--dir",    default=str(PDF_DIR), help="Directory of PDFs to ingest")
     parser.add_argument("--file",   help="Single PDF file to ingest")
     parser.add_argument("--source", help="Override source name for --file")
-    parser.add_argument("--ay",     default="AY2024-25", help="Assessment Year namespace")
+    parser.add_argument("--ay",     default="AY2026-27", help="Assessment Year namespace")
     args = parser.parse_args()
 
     print(f"\n📄 PDF Ingester — ITR-1 Knowledge Base")

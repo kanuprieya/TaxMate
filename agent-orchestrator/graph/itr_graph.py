@@ -23,7 +23,7 @@ from shared.llm_client import get_llm as _get_llm_factory
 
 sys.path.insert(0, str(Path(__file__).parent.parent))  # /app in Docker, project root locally
 from shared.itr1_schema import ITR1Form, ValidationFlag, FieldConfidence, TaxRegime
-from shared.tax_utils import compute_tax, compute_tax_strict, float_safe
+from shared.tax_utils import compute_tax_from_engine, float_safe
 from shared.validator import TaxConfig, TaxValidator
 
 # ── Shared state schema ───────────────────────────────────────────────────────
@@ -105,46 +105,24 @@ def node_fill_form(state: AgentState) -> dict:
         ay_year = 2026
 
     try:
-        # Compute using strict engine (The Single Source of Truth)
-        analysis = compute_tax_strict(extracted, ay=ay_str)
+        # Compute using the config-driven primitive engine (shared.tax_engine)
+        analysis = compute_tax_from_engine(extracted, ay=ay_str)
         comp = analysis["computed"]
-        is_hardcoded = analysis.get("source") == "hardcoded_case"
-        
+
         # Personal info
         form.personal_info.assessment_year = ay_str
         form.personal_info.pan = extracted.get("employee_pan")
         form.personal_info.first_name = extracted.get("employee_name")
 
-        if is_hardcoded or analysis.get("status") == "needs_review":
-            # Bypass validation for hardcoded or already-flagged cases
-            from unittest.mock import MagicMock
-            v_result = MagicMock()
-            v_result.status = analysis.get("status", "ok")
-            v_result.integrity_score = 100.0 if is_hardcoded else 0.0
-            v_result.errors = []
-            v_result.warnings = []
-            
-            if is_hardcoded:
-                # --- RAG INTEGRATION (CRITICAL) ---
-                try:
-                    import requests
-                    import os
-                    rag_url = os.getenv("RAG_SERVICE_URL", "http://rag-service:8001")
-                    rag_data = {
-                        "session_id": state.get("session_id"),
-                        "name": extracted.get("employee_name"),
-                        "regime": comp["tax_regime"],
-                        "taxable_income": comp["taxable_income"],
-                        "tax": comp["total_tax_liability"],
-                        "tds": comp["tds_deducted"],
-                        "refund": comp["refund_or_payable"] if comp["refund_or_payable"] > 0 else 0,
-                        "explanation": comp.get("notes", "")
-                    }
-                    requests.post(f"{rag_url}/store-user-result", json=rag_data, timeout=5)
-                except Exception as e:
-                    print(f"Warning: Failed to sync hardcoded result with RAG: {e}")
+        if analysis.get("status") == "needs_review":
+            # Extraction/config problem already flagged by compute_tax_from_engine
+            # (e.g. missing employee name, or no config for this AY yet) — nothing
+            # to validate against, since there's no computed result.
+            v_result = type("V", (), {
+                "status": "needs_review", "integrity_score": 0.0, "errors": [], "warnings": [],
+            })()
         else:
-            # Initial Fail-Fast Check using production Validator
+            # Fail-fast check using the production Validator
             validator = TaxValidator(TaxConfig(assessment_year=ay_year))
             v_result = validator.validate(extracted, comp)
 
@@ -205,7 +183,7 @@ def node_fill_form(state: AgentState) -> dict:
         audit.append({
             "timestamp": datetime.utcnow().isoformat(),
             "node":      "fill_form",
-            "action":    "Hardcoded Case Processed" if is_hardcoded else "SSOT Computation Completed",
+            "action":    "Tax engine computation completed",
             "status":    v_result.status,
             "regime":    analysis["regime_used"]
         })
@@ -216,7 +194,7 @@ def node_fill_form(state: AgentState) -> dict:
             "regime_analysis":   analysis,
             "status":            analysis["status"] if v_result.status == "ok" else "needs_review",
             "validation_flags":  validation_flags + analysis.get("errors", []) + analysis.get("warnings", []),
-            "confidence_scores": {"overall": 0.95} if is_hardcoded else {},
+            "confidence_scores": {},
             "audit_trail":       audit,
             "integrity_score":   v_result.integrity_score,
             "step":              "fill_form"
@@ -249,7 +227,7 @@ def node_compare_regimes(state: AgentState) -> dict:
     If regime is locked from Form 16, we skip comparison and use the locked result.
     """
     analysis = state.get("regime_analysis", {})
-    if not analysis or "computed" not in analysis or analysis.get("source") == "hardcoded_case" or analysis.get("status") == "needs_review":
+    if not analysis or "computed" not in analysis or analysis.get("status") == "needs_review":
         return {**state, "step": "validate"}
     
     # Check if regime is detected (authoritative)
@@ -270,7 +248,7 @@ def node_compare_regimes(state: AgentState) -> dict:
     extracted_other["tax_regime"] = other_regime
     
     # Even if locked, we compute the other for comparison display
-    analysis_other = compute_tax_strict(extracted_other, ay=ay)
+    analysis_other = compute_tax_from_engine(extracted_other, ay=ay)
     
     curr_tax = float_safe(analysis["computed"].get("total_tax_liability"))
     other_tax = float_safe(analysis_other["computed"].get("total_tax_liability"))
@@ -325,12 +303,12 @@ def node_validate(state: AgentState) -> dict:
     except:
         ay_year = 2026
 
-    # Bypass validation for hardcoded or already-flagged cases
-    if analysis.get("source") == "hardcoded_case" or analysis.get("status") == "needs_review":
+    # Nothing to validate against if fill_form already flagged the case
+    if analysis.get("status") == "needs_review":
         return {
             **state,
             "validation_flags": flags,
-            "integrity_score": 100.0 if analysis.get("source") == "hardcoded_case" else 0.0,
+            "integrity_score": 0.0,
             "step": "score_confidence"
         }
 

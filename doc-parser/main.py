@@ -80,9 +80,13 @@ async def unified_parse_endpoint(
         # 1. Extract text for detection
         raw_text = ""
         with pdfplumber.open(path) as pdf:
+            page_count = len(pdf.pages)
             for page in pdf.pages[:3]:
                 raw_text += (page.extract_text() or "")
-        
+        print(f"[FORM16-DEBUG] Detection-stage text: {len(raw_text)} chars from first "
+              f"{min(3, page_count)} of {page_count} page(s)", flush=True)
+        print(f"[FORM16-DEBUG] Detection-stage first 500 chars: {raw_text[:500]!r}", flush=True)
+
         # 2. Detect type
         detected_type = detect_document_type(raw_text)
         print(f"DEBUG: Detected type: {detected_type}")
@@ -115,7 +119,7 @@ async def unified_parse_endpoint(
             except:
                 raise HTTPException(status_code=422, detail="Unsupported or unrecognized document format.")
 
-        return {
+        response = {
             "success":    True,
             "doc_type":   doc_type.lower() if doc_type != "BANKSTMT" else "bank_statement",
             "session_id": session_id or str(uuid.uuid4()),
@@ -123,6 +127,8 @@ async def unified_parse_endpoint(
             "confidence": result.get("parse_confidence", 0.5),
             "warnings":   result.get("warnings", []),
         }
+        print(f"[FORM16-DEBUG] Final response returned to caller:\n{json.dumps(response, indent=2, default=str)}", flush=True)
+        return response
 
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Parse failed: {str(e)}")

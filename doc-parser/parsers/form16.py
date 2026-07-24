@@ -1,11 +1,17 @@
+import json
 import re
+import sys
+from pathlib import Path
 from typing import Optional
 from pydantic import BaseModel
+
+sys.path.insert(0, str(Path(__file__).parent.parent))  # /app in Docker — for `shared.llm_client`
 
 class Form16Data(BaseModel):
     employee_name: Optional[str] = None
     employee_pan: Optional[str] = None
     assessment_year: Optional[str] = None
+    tax_regime_llm: Optional[str] = None  # "old" | "new", set only by LLM extraction
     gross_salary: float = 0.0
     salary_as_per_17_1: float = 0.0
     perquisites_17_2: float = 0.0
@@ -89,10 +95,95 @@ PART_B_PATTERNS = {
                                    r"Total.*?TDS\s+deducted[\s\.\:]*([\d,]+\.?\d*)"],
 }
 
+# ── LLM-based extraction (primary path) ────────────────────────────────────────
+# Form 16 layouts vary by employer/payroll software, and pdfplumber's raw text
+# frequently reorders table cells (values before labels, side-by-side columns
+# interleaved into single lines). Regex against that is fragile — see
+# parse_form16_text() below, kept only as a fallback for when no LLM provider
+# is reachable. An LLM can use context to recover the right field even when
+# its literal position in the extracted text is scrambled.
+
+FORM16_EXTRACTION_SYSTEM_PROMPT = """You are extracting structured data from an Indian Form 16 (TDS certificate) PDF's raw text. The text was extracted with pdfplumber and may have jumbled column order, merged lines, or values appearing before their labels — read the whole document and use context/reasoning to find the correct value for each field, don't just pattern-match nearby text.
+
+Return ONLY a single valid JSON object (no markdown fences, no commentary) with exactly these keys:
+
+{
+  "employee_name": string,               // the EMPLOYEE's full name (not the employer's, not the signatory/deductor's authorized signatory)
+  "employee_pan": string,                // the EMPLOYEE's PAN (10-char alphanumeric, e.g. AKLPU4174E) — NOT the Deductor's/Employer's PAN or TAN
+  "assessment_year": string,             // format "YYYY-YY", e.g. "2025-26"
+  "tax_regime": "old" or "new",          // find the question about "opting out of taxation u/s 115BAC(1A)" AND its Yes/No answer: answer "Yes" (opting OUT of 115BAC, the new regime section) means OLD regime; "No" or the question being absent means NEW regime. Do not guess from the section number alone — the section number appears in the question text regardless of the answer.
+  "gross_salary": number,                // Gross Salary total
+  "salary_as_per_17_1": number,          // Salary as per section 17(1)
+  "perquisites_17_2": number,            // Value of perquisites under section 17(2)
+  "profits_17_3": number,                // Profits in lieu of salary under section 17(3)
+  "hra_10_13a": number,                  // House rent allowance exemption under section 10(13A)
+  "hra_received": number,                // Actual HRA received (0 if not separately stated)
+  "lta_10_5": number,                    // Leave travel allowance/concession exemption under section 10(5)
+  "other_exempt_10": number,             // Other exempt allowances under section 10(14)
+  "total_exempt_10": number,             // Total exemption claimed under section 10
+  "standard_deduction_16ia": number,     // Standard deduction under section 16(ia)
+  "professional_tax_16iii": number,      // Tax on employment / professional tax under section 16(iii)
+  "income_under_salary": number,         // Income chargeable under the head "Salaries"
+  "house_property_loss": number,         // Income/loss from house property (negative if a loss)
+  "other_sources_income": number,        // Income under the head "Other Sources"
+  "sec_80c_claimed": number,             // Deductible amount under section 80C SPECIFICALLY — not the combined "80C, 80CCC and 80CCD(1)" total row
+  "sec_80ccd_1_claimed": number,         // Deductible amount under section 80CCD(1) SPECIFICALLY — not the combined total, and not 80CCD(1B) or 80CCD(2)
+  "sec_80d_claimed": number,             // Deductible amount under section 80D
+  "total_vi_a_claimed": number,          // Aggregate deductible amount under Chapter VI-A
+  "taxable_income_form16": number,       // Total taxable income as stated on the form
+  "tax_payable_form16": number,          // Tax/net tax payable as stated on the form
+  "tds_deducted_form16": number          // Total TDS deducted (Part A summary "Total (Rs.)" under Amount of tax deducted)
+}
+
+Rules:
+- Use 0 for any amount not present or not applicable — never omit a key.
+- Numbers must be plain numbers: no currency symbols, no commas, no text.
+- If employee_name, employee_pan, or assessment_year are genuinely not determinable, use an empty string — never fabricate them.
+- Return ONLY the JSON object. No explanation, no markdown code fences."""
+
+
+def _parse_llm_json(raw: str) -> dict:
+    """Strips markdown code fences if present, then parses JSON. Falls back to
+    extracting the outermost {...} block if the model added stray text around it."""
+    text = raw.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return json.loads(text[start:end + 1])
+        raise
+
+
+def extract_form16_llm(full_text: str) -> Form16Data:
+    from shared.llm_client import complete_with_system
+
+    print(f"[FORM16-DEBUG] Calling LLM for extraction ({len(full_text)} chars of input text)...", flush=True)
+    raw_response = complete_with_system(
+        system=FORM16_EXTRACTION_SYSTEM_PROMPT,
+        user=f"Form 16 raw extracted text:\n\n{full_text}",
+        temperature=0.0,
+    )
+    print(f"[FORM16-DEBUG] RAW LLM response:\n{raw_response}", flush=True)
+
+    parsed = _parse_llm_json(raw_response)
+    print(f"[FORM16-DEBUG] Parsed JSON from LLM:\n{json.dumps(parsed, indent=2, default=str)}", flush=True)
+
+    known_fields = {k: v for k, v in parsed.items() if k in Form16Data.model_fields}
+    result = Form16Data(**known_fields)
+    result.tax_regime_llm = parsed.get("tax_regime") if parsed.get("tax_regime") in ("old", "new") else None
+    result.raw_text_snippet = full_text
+    return result
+
+
 def parse_form16_text(full_text: str) -> Form16Data:
     result = Form16Data()
     result.raw_text_snippet = full_text
+    print(f"[FORM16-DEBUG] Starting regex extraction over {len(full_text)} chars", flush=True)
     for field, patterns in {**PART_A_PATTERNS, **PART_B_PATTERNS}.items():
+        matched = False
         for pattern in patterns:
             match = re.search(pattern, full_text, re.IGNORECASE | re.DOTALL)
             if match:
@@ -102,28 +193,55 @@ def parse_form16_text(full_text: str) -> Form16Data:
                         setattr(result, field, match.group(1).strip())
                     else:
                         setattr(result, field, float(val_str))
+                    matched = True
+                    print(f"[FORM16-DEBUG]   {field}: MATCHED pattern {pattern!r} -> {getattr(result, field)!r}", flush=True)
                     break
-                except:
+                except Exception as e:
+                    print(f"[FORM16-DEBUG]   {field}: pattern matched but value conversion failed "
+                          f"({e}) for raw group={match.group(1)!r}", flush=True)
                     continue
+        if not matched:
+            print(f"[FORM16-DEBUG]   {field}: NO MATCH — tried {len(patterns)} pattern(s)", flush=True)
     return result
 
 def parse_form16(path: str) -> Form16Data:
     import pdfplumber
     full_text = ""
     with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
-            full_text += (page.extract_text() or "") + "\n"
-    return parse_form16_text(full_text)
+        print(f"[FORM16-DEBUG] Opened PDF with {len(pdf.pages)} page(s): {path}", flush=True)
+        for i, page in enumerate(pdf.pages):
+            page_text = page.extract_text() or ""
+            print(f"[FORM16-DEBUG] --- page {i+1} raw pdfplumber text ({len(page_text)} chars) ---", flush=True)
+            print(page_text, flush=True)
+            print(f"[FORM16-DEBUG] --- end page {i+1} ---", flush=True)
+            full_text += page_text + "\n"
+    print(f"[FORM16-DEBUG] TOTAL extracted text length: {len(full_text)} chars", flush=True)
+    if len(full_text.strip()) == 0:
+        print("[FORM16-DEBUG] WARNING: pdfplumber extracted ZERO text — likely a scanned/image-based "
+              "PDF or a text layer pdfplumber can't read. Extraction cannot work on empty text.", flush=True)
+        return parse_form16_text(full_text)
+
+    try:
+        return extract_form16_llm(full_text)
+    except Exception as e:
+        print(f"[FORM16-DEBUG] LLM extraction failed ({e!r}) — falling back to regex extraction", flush=True)
+        return parse_form16_text(full_text)
 
 def form16_to_dict(data: Form16Data) -> dict:
-    regime = "new"
-    text = data.raw_text_snippet.lower()
-    if any(k in text for k in ["old tax regime", "10-iea", "10-ie", "opted out of 115bac"]):
-        regime = "old"
-    elif any(k in text for k in ["new tax regime", "115bac(1a)", "default regime"]):
+    if data.tax_regime_llm in ("old", "new"):
+        # LLM read the actual Yes/No answer to the 115BAC(1A) opt-out question.
+        regime = data.tax_regime_llm
+    else:
+        # Regex fallback path only: crude keyword scan (can't correlate a
+        # question with its Yes/No answer, so this is a known weaker signal).
         regime = "new"
+        text = data.raw_text_snippet.lower()
+        if any(k in text for k in ["old tax regime", "10-iea", "10-ie", "opted out of 115bac"]):
+            regime = "old"
+        elif any(k in text for k in ["new tax regime", "115bac(1a)", "default regime"]):
+            regime = "new"
     
-    return {
+    mapped = {
         "employee_name": data.employee_name,
         "employee_pan": data.employee_pan,
         "assessment_year": data.assessment_year or "2026-27",
@@ -151,3 +269,5 @@ def form16_to_dict(data: Form16Data) -> dict:
             "total": data.total_vi_a_claimed or (data.sec_80c_claimed + data.sec_80d_claimed)
         }
     }
+    print(f"[FORM16-DEBUG] Final form16_to_dict() output:\n{json.dumps(mapped, indent=2, default=str)}", flush=True)
+    return mapped

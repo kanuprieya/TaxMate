@@ -83,47 +83,42 @@ def float_safe(v):
     except: return 0.0
 
 # -----------------------------
-# HARDCODED CASES (Deterministic Pipeline)
+# Real tax computation, via the config-driven primitive engine
+# (shared/tax_engine). Replaces the old name-keyed hardcoded lookup —
+# this works for any taxpayer, not just three fixture names.
 # -----------------------------
-HARDCODED_CASES = {
-    "priya nair": {
-        "regime": "new",
-        "taxable_income": 633000,
-        "tax_liability": 0,
-        "final_tax": 0,
-        "tds": 30000,
-        "refund": 30000,
-        "notes": "Full rebate under 87A applied"
-    },
-    "arjun mehta": {
-        "regime": "new",
-        "taxable_income": 1675000,
-        "tax_liability": 140400,
-        "final_tax": 140400,
-        "tds": 220000,
-        "refund": 79600,
-        "notes": "Computed using new regime with 80CCD(2)"
-    },
-    "sneha iyer": {
-        "regime": "new",
-        "taxable_income": 402600,
-        "tax_liability": 0,
-        "final_tax": 0,
-        "tds": 12000,
-        "refund": 12000,
-        "notes": "Full rebate under 87A applied"
+from shared.tax_engine import compute as _engine_compute
+
+
+def _extracted_to_engine_inputs(extracted: dict) -> dict:
+    """Maps doc-parser's Form16 extraction shape (see doc-parser/parsers/form16.py
+    ::form16_to_dict) onto the flat input shape shared.tax_engine primitives expect.
+
+    Standard deduction is deliberately NOT taken from the extracted document —
+    the engine always applies the AY config's canonical amount, since a Form 16
+    can reflect a stale figure from outdated employer payroll software.
+    """
+    gross_salary = extracted.get("gross_salary", {})
+    other_income = extracted.get("other_income", {})
+    chapter_6a   = extracted.get("chapter_6A", {})
+
+    return {
+        "gross_salary":          float_safe(gross_salary.get("total", 0.0)),
+        "exempt_allowances":     float_safe(extracted.get("total_exemptions", 0.0)),
+        "professional_tax":      float_safe(extracted.get("professional_tax", 0.0)),
+        "house_property_income": float_safe(other_income.get("house_property", 0.0)),
+        "other_source_income":   float_safe(other_income.get("other_sources", 0.0)),
+        "deductions": {
+            "sec_80c": float_safe(chapter_6a.get("80C", 0.0)),
+            "sec_80d": float_safe(chapter_6a.get("80D", 0.0)),
+        },
     }
-}
 
-def get_hardcoded_case(name: str):
-    if not name: return None
-    name_norm = name.lower().strip()
-    return HARDCODED_CASES.get(name_norm)
 
-def compute_tax_strict(extracted: dict, ay: str = "AY2026-27") -> dict:
-    cfg = get_config(ay)
-    
-    # --- NAME DETECTION (Deterministic fallback) ---
+def compute_tax_from_engine(extracted: dict, ay: str = "AY2026-27") -> dict:
+    """Runs the real primitive/config tax engine against extracted Form 16 data
+    and reshapes its output into the same 'computed' dict shape the rest of the
+    pipeline (agent-orchestrator's LangGraph nodes) already expects."""
     raw_name = extracted.get("employee_name") or ""
     if not raw_name.strip():
         return {
@@ -134,59 +129,65 @@ def compute_tax_strict(extracted: dict, ay: str = "AY2026-27") -> dict:
             "errors": [{
                 "field": "employee_name",
                 "severity": "error",
-                "message": "Employee name could not be extracted. This is mandatory for deterministic processing."
+                "message": "Employee name could not be extracted from the uploaded Form 16.",
             }],
             "regime_used": "missing",
-            "extracted": extracted
+            "extracted": extracted,
         }
-    
-    hardcoded = get_hardcoded_case(raw_name)
-    
-    if hardcoded:
-        # Map hardcoded fields to the internal schema
-        comp = {
-            "gross_salary": "missing", # Not needed for hardcoded
-            "salary_income": "missing",
-            "hra_exemption": 0.0,
-            "total_exemptions": 0.0,
-            "standard_deduction": 0.0,
-            "professional_tax": 0.0,
-            "taxable_salary": "missing",
-            "gross_total_income": "missing",
-            "taxable_income": hardcoded["taxable_income"],
-            "tax_before_rebate": 0.0,
-            "rebate_87a": 0.0,
-            "tax_after_rebate": 0.0,
-            "cess": 0.0,
-            "total_tax_liability": hardcoded["final_tax"],
-            "tds_deducted": hardcoded["tds"],
-            "refund_or_payable": hardcoded["refund"] if hardcoded["refund"] > 0 else -hardcoded["tax_liability"],
-            "tax_regime": hardcoded["regime"],
-            "notes": hardcoded["notes"]
-        }
+
+    regime = extracted.get("tax_regime", "new")
+    inputs = _extracted_to_engine_inputs(extracted)
+
+    try:
+        state = _engine_compute(ay, regime, inputs)
+    except FileNotFoundError:
         return {
-            "status": "ok",
-            "source": "hardcoded_case",
-            "computed": comp,
+            "status": "needs_review",
+            "message": f"No tax rules configured for {ay}",
+            "computed": {},
             "warnings": [],
-            "errors": [],
-            "regime_used": hardcoded["regime"],
-            "extracted": extracted
+            "errors": [{
+                "field": "assessment_year",
+                "severity": "error",
+                "message": f"No tax config exists for {ay} ({regime} regime) yet. "
+                            f"Currently supported: AY2026-27.",
+            }],
+            "regime_used": "missing",
+            "extracted": extracted,
         }
-    
-    # If not hardcoded, return unsupported case error as requested
+
+    tds_deducted = float_safe(extracted.get("tds", 0.0))
+    total_tax = state.get("total_tax", 0.0)
+    refund_or_payable = tds_deducted - total_tax  # positive = refund, negative = payable
+
+    comp = {
+        "gross_salary":        inputs["gross_salary"],
+        "salary_income":       state.get("net_salary", 0.0),
+        "hra_exemption":       float_safe(extracted.get("hra_exempt", 0.0)),
+        "total_exemptions":    inputs["exempt_allowances"],
+        "standard_deduction":  state.get("standard_deduction_applied", 0.0),
+        "professional_tax":    inputs["professional_tax"],
+        "taxable_salary":      state.get("net_salary", 0.0),
+        "gross_total_income":  state.get("gross_total_income", 0.0),
+        "taxable_income":      state.get("taxable_income", 0.0),
+        "tax_before_rebate":   state.get("tax_before_rebate", 0.0),
+        "rebate_87a":          state.get("rebate_87a", 0.0),
+        "tax_after_rebate":    state.get("tax_after_rebate", 0.0),
+        "cess":                state.get("health_education_cess", 0.0),
+        "total_tax_liability": total_tax,
+        "tds_deducted":        tds_deducted,
+        "refund_or_payable":   refund_or_payable,
+        "tax_regime":          regime,
+        "notes":               f"Computed via the config-driven tax engine ({ay}, {regime} regime).",
+    }
     return {
-        "status": "needs_review",
-        "message": "Unsupported case",
-        "computed": {},
+        "status": "ok",
+        "source": "tax_engine",
+        "computed": comp,
         "warnings": [],
-        "errors": [{
-            "field": "engine",
-            "severity": "error",
-            "message": f"Unsupported case: Employee '{raw_name}' is not in the deterministic pipeline."
-        }],
-        "regime_used": "missing",
-        "extracted": extracted
+        "errors": [],
+        "regime_used": regime,
+        "extracted": extracted,
     }
 
 def enforce_deduction_limits(deductions: dict, ay: str = "AY2026-27") -> dict:
@@ -216,12 +217,12 @@ def compare_regimes(extracted: dict, ay: str = "AY2026-27") -> dict:
     # Compute New Regime
     ext_new = copy.deepcopy(extracted)
     ext_new["tax_regime"] = "new"
-    res_new = compute_tax_strict(ext_new, ay)
-    
+    res_new = compute_tax_from_engine(ext_new, ay)
+
     # Compute Old Regime
     ext_old = copy.deepcopy(extracted)
     ext_old["tax_regime"] = "old"
-    res_old = compute_tax_strict(ext_old, ay)
+    res_old = compute_tax_from_engine(ext_old, ay)
     
     tax_new = float_safe(res_new["computed"].get("total_tax_liability"))
     tax_old = float_safe(res_old["computed"].get("total_tax_liability"))

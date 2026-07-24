@@ -1,0 +1,52 @@
+"""
+Generic tax pipeline interpreter
+===================================
+Walks the ordered `steps` list from a per-AY/regime config file and calls
+the matching primitive. This file is AY-agnostic by construction and must
+never change to support a new assessment year — only new config JSON files
+(and, for a genuinely new tax mechanism, a new primitive) should change.
+"""
+from __future__ import annotations
+import json
+from pathlib import Path
+
+from . import primitives as _p
+
+CONFIG_DIR = Path(__file__).parent / "configs"
+
+PRIMITIVES = {
+    "aggregate_gross_income": _p.aggregate_gross_income,
+    "apply_deductions": _p.apply_deductions,
+    "compute_taxable_income": _p.compute_taxable_income,
+    "apply_slabs": _p.apply_slabs,
+    "apply_rebate": _p.apply_rebate,
+    "apply_surcharge": _p.apply_surcharge,
+    "apply_cess": _p.apply_cess,
+}
+
+
+def load_config(ay: str, regime: str) -> dict:
+    path = CONFIG_DIR / f"{ay}_{regime}.json"
+    if not path.exists():
+        raise FileNotFoundError(f"No tax config for AY={ay} regime={regime}: {path}")
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def run_pipeline(config: dict, inputs: dict) -> dict:
+    state = dict(inputs)
+    for step in config["steps"]:
+        op = step["op"]
+        fn = PRIMITIVES.get(op)
+        if fn is None:
+            raise ValueError(
+                f"Unknown primitive '{op}' referenced in config "
+                f"(ay={config.get('ay')}, regime={config.get('regime')})"
+            )
+        state = fn(state, step.get("params", {}))
+    return state
+
+
+def compute(ay: str, regime: str, inputs: dict) -> dict:
+    config = load_config(ay, regime)
+    return run_pipeline(config, inputs)
