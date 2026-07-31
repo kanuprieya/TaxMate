@@ -23,11 +23,28 @@ PRIMITIVES = {
     "apply_surcharge": _p.apply_surcharge,
     "apply_cess": _p.apply_cess,
     "round_statutory": _p.round_statutory,
+    # ITR-2-only primitives (see shared/tax_engine/primitives.py) — only ever
+    # referenced by *_ITR2_*.json configs, never by ITR-1's.
+    "aggregate_house_properties": _p.aggregate_house_properties,
+    "compute_capital_gains": _p.compute_capital_gains,
+    "apply_special_rate_capital_gains_tax": _p.apply_special_rate_capital_gains_tax,
+    "apply_foreign_tax_credit": _p.apply_foreign_tax_credit,
 }
 
 
+def config_path(ay: str, regime: str) -> Path:
+    """Builds the path load_config() reads from. Extracted as its own
+    function so callers that need to know/construct a config's location
+    (e.g. shared/tax_utils_itr2.py's ITR-2 namespacing) have one shared
+    place to do it instead of re-deriving the '{ay}_{regime}.json'
+    convention themselves. Pure refactor of load_config's prior inline
+    logic — resolves to the exact same path as before for every caller.
+    """
+    return CONFIG_DIR / f"{ay}_{regime}.json"
+
+
 def load_config(ay: str, regime: str) -> dict:
-    path = CONFIG_DIR / f"{ay}_{regime}.json"
+    path = config_path(ay, regime)
     if not path.exists():
         raise FileNotFoundError(f"No tax config for AY={ay} regime={regime}: {path}")
     with open(path, encoding="utf-8") as f:

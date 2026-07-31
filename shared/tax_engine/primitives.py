@@ -180,3 +180,207 @@ def apply_cess(state: dict, params: dict) -> dict:
     state["health_education_cess"] = cess
     state["total_tax"] = round(base + cess, 2)
     return state
+
+
+# ── ITR-2-only primitives ────────────────────────────────────────────────────
+# Everything below exists because ITR-2 filers can have income the 7 primitives
+# above were never meant to model: multiple house properties, capital gains
+# taxed at special rates instead of slab rates, and foreign income eligible for
+# DTAA relief. Each is a genuinely new computation mechanism (same rationale
+# that justified round_statutory as an 8th primitive), not a variant of an
+# existing one — so each gets its own primitive rather than a branch inside
+# aggregate_gross_income/apply_slabs/apply_cess, which stay untouched and keep
+# serving ITR-1 exactly as before. ITR-2 configs are simply free to place these
+# alongside the original 8 in their own `steps` list.
+#
+# Known simplifications (first-cut scaffold, not a certified compliance
+# engine — flagged here rather than left implicit):
+#   - Capital loss set-off follows Sections 70/74 only loosely: losses net
+#     within their own bucket and short-term loss offsets long-term gain, but
+#     inter-year carry-forward is only surfaced as a number, not tracked
+#     across filing years.
+#   - The indexation/rate transition introduced by the Finance Act 2024 (LTCG
+#     on land/building/unlisted shares acquired before 23-Jul-2024 can choose
+#     indexed 20% vs unindexed 12.5%) is not modelled — configs pick one rate
+#     path and apply it uniformly.
+#   - Surcharge here reuses the plain apply_surcharge primitive; the special
+#     15% surcharge cap that applies specifically to capital-gains/dividend
+#     income regardless of the taxpayer's slab is not separately enforced.
+
+
+def aggregate_house_properties(state: dict, params: dict) -> dict:
+    """Schedule HP for multiple properties (ITR-1's single implicit property
+    is handled entirely outside the engine, in itr1_schema.py's own
+    HousePropertyIncome.compute() — this primitive is ITR-2's replacement,
+    operating on a list instead of one scalar).
+
+    state['house_properties']: list of
+        {annual_value, municipal_tax_paid, interest_on_loan_24b, property_type}
+    Nets each property (30% standard deduction, self-occupied interest capped
+    at Rs 2,00,000 per Sec 24(b) — a fixed statutory figure, hardcoded here
+    for the same reason round_to_nearest_10 hardcodes "nearest 10"), sums
+    them, then applies the Sec 71(3A) cap: house-property loss set off
+    against OTHER heads of income is capped at Rs 2,00,000 in aggregate
+    across ALL properties combined, not per property. Anything beyond that
+    cap is only surfaced as 'house_property_loss_carried_forward', not
+    actually applied this year.
+
+    Writes state['house_property_income'] (the flat number
+    aggregate_gross_income already knows how to consume unmodified) plus a
+    breakdown for explainability.
+    """
+    state = dict(state)
+    SELF_OCCUPIED_INTEREST_CAP = 200000.0
+    AGGREGATE_LOSS_SETOFF_CAP = 200000.0
+
+    properties = state.get("house_properties", [])
+    breakdown = []
+    total = 0.0
+    for prop in properties:
+        annual_value = prop.get("annual_value", 0.0)
+        municipal_tax = prop.get("municipal_tax_paid", 0.0)
+        interest = prop.get("interest_on_loan_24b", 0.0)
+        is_self_occupied = prop.get("property_type", "self_occupied") == "self_occupied"
+
+        net_annual_value = max(0.0, annual_value - municipal_tax)
+        standard_deduction_30pct = net_annual_value * 0.30
+        capped_interest = min(interest, SELF_OCCUPIED_INTEREST_CAP) if is_self_occupied else interest
+
+        income = net_annual_value - standard_deduction_30pct - capped_interest
+        breakdown.append({**prop, "net_annual_value": net_annual_value, "income": round(income, 2)})
+        total += income
+
+    if total < -AGGREGATE_LOSS_SETOFF_CAP:
+        state["house_property_income"] = -AGGREGATE_LOSS_SETOFF_CAP
+        state["house_property_loss_carried_forward"] = round(-total - AGGREGATE_LOSS_SETOFF_CAP, 2)
+    else:
+        state["house_property_income"] = round(total, 2)
+        state["house_property_loss_carried_forward"] = 0.0
+
+    state["house_property_breakdown"] = breakdown
+    return state
+
+
+def compute_capital_gains(state: dict, params: dict) -> dict:
+    """Schedule CG. Classifies each transaction into a special-rate bucket
+    (taxed later by apply_special_rate_capital_gains_tax) or, for gains that
+    are taxed at slab rate rather than a special rate, folds them straight
+    into 'other_source_income' — the field aggregate_gross_income already
+    sums unmodified, so no existing primitive needs to know capital gains
+    exist at all.
+
+    state['capital_gains_raw']: list of transactions, each
+        {asset_type: "equity_stt" | "other",
+         holding_period_months: float,
+         sale_value, cost_of_acquisition, improvement_cost, exemption_claimed}
+    params: {equity_ltcg_months, other_ltcg_months} — holding period above
+    which a gain is long-term; below it, short-term.
+
+    Equity-with-STT short-term gains fall under Sec 111A (special rate);
+    non-equity short-term gains are slab-taxed (folded into other_source_income).
+    Both equity and non-equity long-term gains get a special rate (112A / 112
+    respectively) — kept as separate buckets since 112A alone carries the
+    annual exemption threshold.
+    """
+    state = dict(state)
+    equity_ltcg_months = params.get("equity_ltcg_months", 12)
+    other_ltcg_months = params.get("other_ltcg_months", 24)
+
+    stcg_111a = stcg_slab = ltcg_112a = ltcg_112_other = 0.0
+    breakdown = []
+
+    for txn in state.get("capital_gains_raw", []):
+        is_equity = txn.get("asset_type") == "equity_stt"
+        holding_months = txn.get("holding_period_months", 0.0)
+        ltcg_threshold = equity_ltcg_months if is_equity else other_ltcg_months
+        is_long_term = holding_months >= ltcg_threshold
+
+        gain = (
+            txn.get("sale_value", 0.0)
+            - txn.get("cost_of_acquisition", 0.0)
+            - txn.get("improvement_cost", 0.0)
+            - txn.get("exemption_claimed", 0.0)
+        )
+
+        if is_equity and is_long_term:
+            ltcg_112a += gain
+        elif is_equity and not is_long_term:
+            stcg_111a += gain
+        elif not is_equity and is_long_term:
+            ltcg_112_other += gain
+        else:
+            stcg_slab += gain
+
+        breakdown.append({**txn, "is_long_term": is_long_term, "gain": round(gain, 2)})
+
+    # Short-term capital loss may offset long-term gains (Sec 70); long-term
+    # loss may only offset other long-term gains. Simplified same-head netting
+    # only — not a full Chapter VI-A set-off/carry-forward implementation.
+    if stcg_111a < 0:
+        ltcg_112_other += stcg_111a
+        stcg_111a = 0.0
+    if ltcg_112_other < 0:
+        ltcg_112a += ltcg_112_other
+        ltcg_112_other = 0.0
+
+    state["capital_gains"] = {
+        "stcg_111a": round(max(0.0, stcg_111a), 2),
+        "ltcg_112a": round(max(0.0, ltcg_112a), 2),
+        "ltcg_112_other": round(max(0.0, ltcg_112_other), 2),
+    }
+    state["capital_gains_breakdown"] = breakdown
+    state["other_source_income"] = state.get("other_source_income", 0.0) + stcg_slab
+    return state
+
+
+def apply_special_rate_capital_gains_tax(state: dict, params: dict) -> dict:
+    """Tax on Sec 111A/112/112A buckets produced by compute_capital_gains.
+    These are taxed at flat rates instead of the slab schedule, so this runs
+    independently of apply_slabs and folds its result into 'tax_after_rebate'
+    — the same field apply_surcharge/apply_cess already read from — rather
+    than requiring either of those primitives to learn a new field name.
+
+    params: {stcg_111a_rate, ltcg_112a_rate, ltcg_112a_exemption, ltcg_112_other_rate}
+    Sec 87A rebate does not apply to these buckets, which is why this runs
+    AFTER apply_rebate rather than before.
+    """
+    state = dict(state)
+    cg = state.get("capital_gains", {})
+
+    stcg_111a_tax = cg.get("stcg_111a", 0.0) * params.get("stcg_111a_rate", 0.20)
+    ltcg_112a_taxable = max(0.0, cg.get("ltcg_112a", 0.0) - params.get("ltcg_112a_exemption", 0.0))
+    ltcg_112a_tax = ltcg_112a_taxable * params.get("ltcg_112a_rate", 0.125)
+    ltcg_112_other_tax = cg.get("ltcg_112_other", 0.0) * params.get("ltcg_112_other_rate", 0.125)
+
+    capital_gains_tax = round(stcg_111a_tax + ltcg_112a_tax + ltcg_112_other_tax, 2)
+    state["capital_gains_tax"] = capital_gains_tax
+    state["tax_after_rebate"] = round(state.get("tax_after_rebate", 0.0) + capital_gains_tax, 2)
+    return state
+
+
+def apply_foreign_tax_credit(state: dict, params: dict) -> dict:
+    """Sec 90/91 DTAA foreign tax credit relief: the lower of (foreign tax
+    actually paid) and (the proportionate share of Indian tax attributable to
+    that foreign income). Runs AFTER apply_cess since relief is granted
+    against final tax liability including cess (Rule 128), and writes
+    'total_tax' directly since it's the last step before rounding.
+
+    state['foreign_income']: {foreign_income_amount, foreign_tax_paid}
+    """
+    state = dict(state)
+    fi = state.get("foreign_income", {})
+    foreign_income_amount = fi.get("foreign_income_amount", 0.0)
+    foreign_tax_paid = fi.get("foreign_tax_paid", 0.0)
+
+    taxable_income = state.get("taxable_income", 0.0)
+    total_tax = state.get("total_tax", 0.0)
+
+    if taxable_income > 0 and foreign_income_amount > 0:
+        proportionate_indian_tax = total_tax * (foreign_income_amount / taxable_income)
+        relief = round(min(foreign_tax_paid, proportionate_indian_tax), 2)
+    else:
+        relief = 0.0
+
+    state["foreign_tax_credit_relief"] = relief
+    state["total_tax"] = round(max(0.0, total_tax - relief), 2)
+    return state

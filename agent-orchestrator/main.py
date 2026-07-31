@@ -57,34 +57,43 @@ def health():
 @app.post("/pipeline/run")
 async def run_pipeline(req: RunPipelineRequest):
     """
-    Run the full ITR-1 agent pipeline:
+    Run the full agent pipeline:
     parse → fill → compare regimes → validate → score → explain
+
+    Which form (ITR-1 or ITR-2) is decided entirely by graph/router.py —
+    this endpoint just calls it and remembers which one ran, so later calls
+    for the same session (get/update-field/export below) know which graph's
+    node functions and response key ("itr1_form" vs "itr2_form") apply.
     """
-    from graph.itr_graph import run_itr_pipeline
+    from graph.router import run_pipeline as route_and_run
 
     session_id = req.session_id or str(uuid.uuid4())
 
     try:
-        result = run_itr_pipeline(
+        form_type, result = route_and_run(
             parsed_documents=req.parsed_documents,
             session_id=session_id,
             ay=req.ay,
         )
-        
+        form_key = "itr1_form" if form_type == "itr1" else "itr2_form"
+
         # Check if graph returned an error in state
         if result.get("error"):
             return {
                 "success": False,
                 "status": "needs_review",
                 "message": result["error"],
-                "session_id": session_id
+                "session_id": session_id,
+                "form_type": form_type,
             }
 
+        result["_form_type"] = form_type
         _session_store[session_id] = result
         return {
             "success":    True,
             "session_id": session_id,
-            "itr1_form":  result["itr1_form"],
+            "form_type":  form_type,
+            form_key:     result[form_key],
             "regime_analysis":    result.get("regime_analysis", {}),
             "validation_flags":   result.get("validation_flags", []),
             "confidence_scores":  result.get("confidence_scores", {}),
@@ -119,9 +128,12 @@ def get_session(session_id: str):
     if session_id not in _session_store:
         raise HTTPException(404, "Session not found")
     result = _session_store[session_id]
+    form_type = result.get("_form_type", "itr1")
+    form_key = "itr1_form" if form_type == "itr1" else "itr2_form"
     return {
         "session_id":        session_id,
-        "itr1_form":         result["itr1_form"],
+        "form_type":         form_type,
+        form_key:            result[form_key],
         "confidence_scores": result.get("confidence_scores", {}),
         "validation_flags":  result.get("validation_flags", []),
         "explanations":      result.get("explanations", {}),
@@ -139,7 +151,9 @@ async def update_field(req: UpdateFieldRequest):
         raise HTTPException(404, "Session not found")
 
     result = _session_store[req.session_id]
-    form   = result["itr1_form"]
+    form_type = result.get("_form_type", "itr1")
+    form_key = "itr1_form" if form_type == "itr1" else "itr2_form"
+    form   = result[form_key]
 
     # Navigate dot-path and update
     parts = req.field_path.split(".")
@@ -173,11 +187,14 @@ async def update_field(req: UpdateFieldRequest):
     })
 
     # Re-run relevant pipeline nodes to update tax, regime analysis, and explanations
-    from graph.itr_graph import node_compare_regimes, node_explain
-    
+    if form_type == "itr1":
+        from graph.itr_graph import node_compare_regimes, node_explain
+    else:
+        from graph.itr2_graph import node_compare_regimes, node_explain
+
     # Create a dummy state for the nodes
     temp_state = {
-        "itr1_form":         form,
+        form_key:            form,
         "ay":                result.get("ay", "AY2026-27"),
         "raw_documents":     result.get("raw_documents", []),
         "validation_flags":  result.get("validation_flags", []),
@@ -185,16 +202,23 @@ async def update_field(req: UpdateFieldRequest):
         "audit_trail":       result.get("audit_trail", []),
         "regime_analysis":   result.get("regime_analysis", {}),
     }
-    
-    # Run nodes
+
+    # Run nodes. NOTE: itr_graph.node_explain is a plain sync function, not a
+    # coroutine, despite the pre-existing `await` below — that mismatch
+    # predates this router change and is left exactly as-is here (not this
+    # feature's bug to fix). itr2_graph.node_explain is likewise sync, so it
+    # gets called directly rather than inheriting the same `await`.
     comp_updates = node_compare_regimes(temp_state)
     temp_state.update(comp_updates)
-    
-    expl_updates = await node_explain(temp_state)
+
+    if form_type == "itr1":
+        expl_updates = await node_explain(temp_state)
+    else:
+        expl_updates = node_explain(temp_state)
     temp_state.update(expl_updates)
-    
+
     # Sync back to session store
-    result["itr1_form"]         = temp_state["itr1_form"]
+    result[form_key]            = temp_state[form_key]
     result["validation_flags"]  = temp_state["validation_flags"]
     result["confidence_scores"] = temp_state["confidence_scores"]
     result["explanations"]      = temp_state["explanations"]
@@ -258,14 +282,17 @@ async def chat_query(req: ChatRequest):
 
 @app.get("/pipeline/export/{session_id}")
 def export_form(session_id: str, format: str = "json"):
-    """Export the filled ITR-1 form. Formats: json (more to come)."""
+    """Export the filled ITR-1 or ITR-2 form. Formats: json (more to come)."""
     if session_id not in _session_store:
         raise HTTPException(404, "Session not found")
 
     result = _session_store[session_id]
+    form_type = result.get("_form_type", "itr1")
+    form_key = "itr1_form" if form_type == "itr1" else "itr2_form"
     return {
         "session_id": session_id,
-        "ay":         result["itr1_form"].get("ay", "AY2026-27"),
-        "itr1_form":  result["itr1_form"],
+        "form_type":  form_type,
+        "ay":         result[form_key].get("ay", "AY2026-27"),
+        form_key:     result[form_key],
         "exported_at": __import__("datetime").datetime.utcnow().isoformat(),
     }

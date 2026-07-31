@@ -23,6 +23,10 @@ from parsers.form26as import parse_form26as
 from parsers.ais import parse_ais
 from parsers.tis import parse_tis
 from parsers.bank_statement import parse_bank_statement
+# ITR-2-only document types (capital gains / house property / foreign income)
+from parsers.capital_gains import parse_capital_gains
+from parsers.property import parse_property
+from parsers.foreign_income import parse_foreign_income
 
 try:
     import pdfplumber
@@ -50,6 +54,10 @@ def detect_document_type(text: str) -> str:
         "AIS":      ["Annual Information Statement", "SFT-", "Reported Value", "Modified Value"],
         "TIS":      ["Taxpayer Information Summary", "Processed Value", "Accepted by Taxpayer"],
         "BANKSTMT": ["Account Number", "Transaction Date", "Debit", "Credit", "Balance"],
+        # ITR-2-only document types
+        "CAPITAL_GAINS": ["Capital Gains Statement", "Short Term Capital Gain", "Long Term Capital Gain", "Realized Gain", "Contract Note"],
+        "PROPERTY":      ["Interest Certificate", "Home Loan", "Property Address", "Municipal Tax", "Annual Value"],
+        "FOREIGN_INCOME": ["Schedule FA", "Foreign Asset", "Form 67", "Foreign Tax Credit", "Country of Residence"],
     }
     text_upper = text.upper()
     for doc_type, keywords in checks.items():
@@ -110,6 +118,12 @@ async def unified_parse_endpoint(
         elif doc_type == "BANKSTMT" or doc_type == "BANK_STATEMENT":
             result = parse_bank_statement(str(path))
             doc_type = "BANKSTMT"
+        elif doc_type == "CAPITAL_GAINS":
+            result = parse_capital_gains(raw_text)
+        elif doc_type == "PROPERTY":
+            result = parse_property(raw_text)
+        elif doc_type == "FOREIGN_INCOME":
+            result = parse_foreign_income(raw_text)
         else:
             # Final fallback: try Form 16
             try:

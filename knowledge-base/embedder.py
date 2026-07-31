@@ -143,23 +143,46 @@ def build_faiss_index(embeddings: np.ndarray, chunks: list[dict], namespace: str
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="Embed ITR-1 chunks into FAISS")
+    parser = argparse.ArgumentParser(description="Embed chunks into FAISS")
     parser.add_argument(
         "--backend", choices=["openai", "huggingface"], default="huggingface",
         help="Embedding backend (default: huggingface — free, no API key needed)"
     )
     parser.add_argument(
-        "--ay", default=AY_NAMESPACE,
-        help=f"Assessment Year namespace (default: {AY_NAMESPACE})"
+        "--ay", default=None,
+        help=f"Assessment Year namespace (default: {AY_NAMESPACE}, or "
+             f"'{AY_NAMESPACE}_ITR2' when --form-type itr2)"
+    )
+    parser.add_argument(
+        "--form-type", choices=["itr1", "itr2"], default="itr1",
+        help="Which form's knowledge base to build (default: itr1). This "
+             "only changes the two defaults above (input chunks path and "
+             "index namespace) — rag-service's _load_index() already loads "
+             "whatever namespace it's given with no code changes needed, "
+             "since it treats 'ay' as an opaque filename stem."
+    )
+    parser.add_argument(
+        "--chunks", default=None,
+        help="Override the input chunks JSONL path (default depends on --form-type)"
     )
     args = parser.parse_args()
 
-    print(f"\n🔢 FAISS Embedder — ITR-1 RAG Knowledge Base")
+    if args.form_type == "itr2":
+        ay = args.ay or f"{AY_NAMESPACE}_ITR2"
+        chunks_path = Path(args.chunks) if args.chunks else (
+            Path(__file__).parent / "rag_output" / "itr2" / "combined" / "all_chunks.jsonl"
+        )
+    else:
+        ay = args.ay or AY_NAMESPACE
+        chunks_path = Path(args.chunks) if args.chunks else CHUNKS_JSONL
+
+    print(f"\n🔢 FAISS Embedder — {args.form_type.upper()} RAG Knowledge Base")
     print(f"   Backend:   {args.backend}")
-    print(f"   Namespace: {args.ay}\n")
+    print(f"   Namespace: {ay}")
+    print(f"   Chunks:    {chunks_path}\n")
 
     # 1. Load chunks
-    chunks = load_chunks(CHUNKS_JSONL)
+    chunks = load_chunks(chunks_path)
     texts = [c["text"] for c in chunks]
 
     # 2. Embed
@@ -172,11 +195,11 @@ def main():
     print(f"  ✓ Embeddings shape: {embeddings.shape}")
 
     # 3. Build + save index
-    index_path, meta_path = build_faiss_index(embeddings, chunks, args.ay)
+    index_path, meta_path = build_faiss_index(embeddings, chunks, ay)
 
     print(f"\n✅ DONE")
     print(f"\nTo query the index, use retriever.py:")
-    print(f"  python retriever.py --query 'What is the 80C deduction limit?' --ay {args.ay}")
+    print(f"  python retriever.py --query 'What is the 80C deduction limit?' --ay {ay}")
 
 
 if __name__ == "__main__":

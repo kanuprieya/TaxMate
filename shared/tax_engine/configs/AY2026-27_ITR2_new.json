@@ -1,0 +1,50 @@
+{
+  "ay": "AY2026-27",
+  "regime": "new",
+  "form_type": "itr2",
+  "_comment": "Same statutory slabs/rebate/surcharge/cess as AY2026-27_new.json (this is one statutory schedule shared by all individual taxpayers, not an ITR-1-specific rule) plus the ITR-2-only steps: aggregate_house_properties and compute_capital_gains run first so their outputs (house_property_income / slab-taxable capital gains folded into other_source_income) are ready before aggregate_gross_income runs unmodified; apply_special_rate_capital_gains_tax and apply_foreign_tax_credit are new steps with no ITR-1 equivalent. See shared/tax_engine/primitives.py for the simplifications each new primitive documents.",
+  "steps": [
+    { "op": "aggregate_house_properties", "params": {} },
+    { "op": "compute_capital_gains", "params": { "equity_ltcg_months": 12, "other_ltcg_months": 24 } },
+    { "op": "aggregate_gross_income", "params": { "standard_deduction": 75000 } },
+    { "op": "compute_taxable_income", "params": {} },
+    { "op": "round_statutory", "params": { "field": "taxable_income" } },
+    {
+      "op": "apply_slabs",
+      "params": {
+        "slabs": [
+          [400000, 0.00],
+          [800000, 0.05],
+          [1200000, 0.10],
+          [1600000, 0.15],
+          [2000000, 0.20],
+          [2400000, 0.25],
+          [null, 0.30]
+        ]
+      }
+    },
+    { "op": "apply_rebate", "params": { "income_threshold": 1200000, "max_rebate": 60000 } },
+    {
+      "op": "apply_special_rate_capital_gains_tax",
+      "params": {
+        "stcg_111a_rate": 0.20,
+        "ltcg_112a_rate": 0.125,
+        "ltcg_112a_exemption": 125000,
+        "ltcg_112_other_rate": 0.125
+      }
+    },
+    {
+      "op": "apply_surcharge",
+      "params": {
+        "tiers": [
+          [5000000, 0.10],
+          [10000000, 0.15],
+          [20000000, 0.25]
+        ]
+      }
+    },
+    { "op": "apply_cess", "params": { "rate": 0.04 } },
+    { "op": "apply_foreign_tax_credit", "params": {} },
+    { "op": "round_statutory", "params": { "field": "total_tax" } }
+  ]
+}
