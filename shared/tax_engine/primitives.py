@@ -13,6 +13,43 @@ from __future__ import annotations
 import math
 
 
+def round_to_nearest_10(value: float) -> float:
+    """Sections 288A/288B's rounding algorithm as a plain scalar function, so
+    both the round_statutory primitive and code outside the engine (e.g.
+    rounding a refund/payable figure computed after TDS is merged in) can
+    share one implementation. Paise are dropped first (truncated, not
+    rounded), then the last digit of the whole-rupee amount decides
+    direction: five or more rounds up, less than five rounds down.
+    """
+    whole = math.trunc(value)
+    remainder = whole % 10
+    rounded = whole - remainder + 10 if remainder >= 5 else whole - remainder
+    return float(rounded)
+
+
+def round_statutory(state: dict, params: dict) -> dict:
+    """Sections 288A/288B: round a specified state field to the nearest
+    multiple of ten rupees (see round_to_nearest_10). This is an 8th
+    primitive beyond the original 7 — a case the brief's own "new mechanism
+    needs a new primitive" escape hatch anticipates, not a violation of the
+    fixed set.
+
+    params: {"field": "<state key>"} — nearest is always 10 per the statute,
+    so it isn't a param; hardcoding the literal legal constant here is the
+    correct call, not the kind of hardcoding the config-driven design forbids.
+
+    Per the Act, only two amounts are ever rounded this way: total/taxable
+    income (288A) and the final tax payable or refund due (288B) — never
+    intermediate sub-heads like slab tax, rebate, surcharge, or cess on
+    their own. Callers must only place this primitive at those two config
+    checkpoints.
+    """
+    state = dict(state)
+    field = params["field"]
+    state[field] = round_to_nearest_10(state.get(field, 0.0))
+    return state
+
+
 def aggregate_gross_income(state: dict, params: dict) -> dict:
     """Salary (net of exemptions/standard deduction/professional tax) plus
     house property and other-source income, into gross_total_income."""

@@ -14,6 +14,7 @@
       }
     },
     { "op": "compute_taxable_income", "params": {} },
+    { "op": "round_statutory", "params": { "field": "taxable_income" } },
     {
       "op": "apply_slabs",
       "params": {
@@ -37,6 +38,7 @@
         ]
       }
     },
-    { "op": "apply_cess", "params": { "rate": 0.04 } }
+    { "op": "apply_cess", "params": { "rate": 0.04 } },
+    { "op": "round_statutory", "params": { "field": "total_tax" } }
   ]
 }

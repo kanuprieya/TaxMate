@@ -74,6 +74,73 @@ async def _rag_query(question: str, ay: str = "AY2026-27") -> str:
         return f"[RAG unavailable: {e}]"
 
 
+# ── Per-field confidence scores ────────────────────────────────────────────────
+# "missing" means the field was genuinely never found on the source document
+# (extraction_meta.missing_fields, set by doc-parser's form16_to_dict) —
+# distinct from a confirmed zero, which gets full confidence and a "form16"/
+# "computed" source instead. Rendering both the same way ("—") was exactly
+# the bug: it threw away the signal this node exists to surface.
+
+def _build_field_confidence(extracted: dict, comp: dict) -> dict:
+    missing = set(extracted.get("extraction_meta", {}).get("missing_fields", []))
+
+    def sourced(value, form16_attr, found_msg, missing_msg):
+        is_missing = form16_attr in missing
+        return {
+            "value": value,
+            "confidence": 0.3 if is_missing else 1.0,
+            "source": "missing" if is_missing else "form16",
+            "explanation": missing_msg if is_missing else found_msg,
+            "flagged": is_missing,
+        }
+
+    def computed(value, msg):
+        return {"value": value, "confidence": 1.0, "source": "computed", "explanation": msg, "flagged": False}
+
+    def not_sourced(value, msg):
+        return {"value": value, "confidence": 0.0, "source": "missing", "explanation": msg, "flagged": True}
+
+    chapter_6a = extracted.get("chapter_6A", {})
+    return {
+        "salary_income.gross_salary": sourced(
+            comp.get("gross_salary", 0.0), "gross_salary",
+            "Extracted from Form 16.", "Not found on the uploaded Form 16 — please verify."),
+        "salary_income.allowances_exempt_10_13a": sourced(
+            comp.get("hra_exemption", 0.0), "hra_10_13a",
+            "Extracted from Form 16.", "HRA exemption not found on the uploaded Form 16 — enter manually if applicable."),
+        "salary_income.professional_tax_16iii": sourced(
+            comp.get("professional_tax", 0.0), "professional_tax_16iii",
+            "Extracted from Form 16.", "Professional tax not found on the uploaded Form 16 — please verify."),
+        "deductions.sec_80c": sourced(
+            chapter_6a.get("80C", 0.0), "sec_80c_claimed",
+            "Extracted from Form 16.", "Section 80C not found on the uploaded Form 16 — enter manually if applicable."),
+        "deductions.sec_80d": sourced(
+            chapter_6a.get("80D", 0.0), "sec_80d_claimed",
+            "Extracted from Form 16.", "Section 80D not found on the uploaded Form 16 — enter manually if applicable."),
+        "tds_details.0.tds_deducted": sourced(
+            comp.get("tds_deducted", 0.0), "tds_deducted_form16",
+            "Extracted from Form 16.", "TDS amount not found on the uploaded Form 16 — please verify."),
+
+        "salary_income.standard_deduction_16ia": computed(
+            comp.get("standard_deduction", 0.0), "Statutory standard deduction for this AY/regime."),
+        "tax_computation.gross_total_income": computed(
+            comp.get("gross_total_income", 0.0), "Computed by the tax engine."),
+        "tax_computation.taxable_income": computed(
+            comp.get("taxable_income", 0.0), "Computed by the tax engine, rounded to the nearest ₹10 per Section 288A."),
+        "tax_computation.rebate_87a": computed(
+            comp.get("rebate_87a", 0.0), "Computed by the tax engine."),
+
+        "other_sources.savings_bank_interest": not_sourced(
+            0.0, "Not yet captured — upload Form 26AS/AIS or a bank statement."),
+        "other_sources.fd_interest": not_sourced(
+            0.0, "Not yet captured — upload Form 26AS/AIS or a bank statement."),
+        "deductions.sec_80tta": not_sourced(
+            0.0, "Not yet captured — upload Form 26AS/AIS or a bank statement."),
+        "deductions.sec_80ccd_2": not_sourced(
+            0.0, "Not yet captured — Form 16 extraction doesn't currently parse employer NPS contributions."),
+    }
+
+
 # ── Node 1: Merge documents into ITR-1 form ────────────────────────────────────
 
 def node_fill_form(state: AgentState) -> dict:
@@ -188,13 +255,18 @@ def node_fill_form(state: AgentState) -> dict:
             "regime":    analysis["regime_used"]
         })
 
+        confidence_scores = (
+            _build_field_confidence(extracted, comp)
+            if analysis.get("status") != "needs_review" else {}
+        )
+
         return {
             **state,
             "itr1_form":         form.model_dump(),
             "regime_analysis":   analysis,
             "status":            analysis["status"] if v_result.status == "ok" else "needs_review",
             "validation_flags":  validation_flags + analysis.get("errors", []) + analysis.get("warnings", []),
-            "confidence_scores": {},
+            "confidence_scores": confidence_scores,
             "audit_trail":       audit,
             "integrity_score":   v_result.integrity_score,
             "step":              "fill_form"
@@ -352,7 +424,10 @@ def node_score_confidence(state: AgentState) -> dict:
     
     return {
         **state,
-        "confidence_scores": {"overall": confidence},
+        # Merge, don't replace — node_fill_form already populated real
+        # per-field entries (source: missing/form16/computed); this just
+        # adds the aggregate "overall" figure alongside them.
+        "confidence_scores": {**state.get("confidence_scores", {}), "overall": confidence},
         "step": "explain"
     }
 

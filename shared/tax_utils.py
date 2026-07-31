@@ -87,7 +87,7 @@ def float_safe(v):
 # (shared/tax_engine). Replaces the old name-keyed hardcoded lookup —
 # this works for any taxpayer, not just three fixture names.
 # -----------------------------
-from shared.tax_engine import compute as _engine_compute
+from shared.tax_engine import compute as _engine_compute, round_to_nearest_10
 
 
 def _extracted_to_engine_inputs(extracted: dict) -> dict:
@@ -158,7 +158,9 @@ def compute_tax_from_engine(extracted: dict, ay: str = "AY2026-27") -> dict:
 
     tds_deducted = float_safe(extracted.get("tds", 0.0))
     total_tax = state.get("total_tax", 0.0)
-    refund_or_payable = tds_deducted - total_tax  # positive = refund, negative = payable
+    # Section 288B covers "any amount payable and any refund due" — the net
+    # figure after TDS is itself rounded to the nearest ₹10, same as total_tax.
+    refund_or_payable = round_to_nearest_10(tds_deducted - total_tax)  # positive = refund, negative = payable
 
     comp = {
         "gross_salary":        inputs["gross_salary"],

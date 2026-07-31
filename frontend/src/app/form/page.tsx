@@ -63,9 +63,14 @@ function FieldRow({
   const confidence = conf?.confidence ?? 1;
   const pct        = Math.round(confidence * 100);
   const isAmount   = typeof value === "number";
+  // "—" means genuinely not found on the source document (conf.source ===
+  // "missing") — NOT the same thing as a confirmed ₹0. A field the source
+  // document explicitly states as zero must render as ₹0, not a blank dash,
+  // or the confidence-scoring this row is driven by loses its whole signal.
+  const isMissing  = conf?.source === "missing";
   const display    = isAmount
-    ? value === 0 ? "—" : `₹${Number(value).toLocaleString("en-IN")}`
-    : String(value || "—");
+    ? (isMissing ? "—" : `₹${Number(value).toLocaleString("en-IN")}`)
+    : (isMissing || !value ? "—" : String(value));
 
   const confColor =
     pct >= 80 ? "stroke-success-500"
@@ -112,7 +117,7 @@ function FieldRow({
         )}
 
         <div className={`text-sm font-semibold w-28 text-right font-mono tracking-tight
-          ${!value || value === 0 ? "text-gray-300" : "text-gray-900"}`}>
+          ${isMissing ? "text-gray-300" : "text-gray-900"}`}>
           {display}
         </div>
 

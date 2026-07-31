@@ -112,7 +112,11 @@ class TaxValidator:
         gross_total_income = float(computed.get("gross_total_income", 0))
         total_income = float(computed.get("taxable_income", 0))
 
-        if total_income > gross_total_income and gross_total_income > 0:
+        # Section 288A rounds taxable income to the nearest ₹10 but leaves
+        # gross_total_income unrounded, so taxable_income can legitimately
+        # sit up to ₹5 above it purely from rounding — not a real error.
+        # Anything beyond that tolerance is.
+        if total_income > gross_total_income + 5 and gross_total_income > 0:
             result.errors.append("Total taxable income exceeds gross total income")
 
         # ---- 7. Form 16 reconciliation ----

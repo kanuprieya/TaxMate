@@ -8,31 +8,36 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent))  # /app in Docker — for `shared.llm_client`
 
 class Form16Data(BaseModel):
+    """Numeric fields default to None, meaning 'not found on this document' —
+    distinct from 0.0, which means the document explicitly states a zero/nil
+    value. Collapsing these was the root of the "—" vs ₹0 ambiguity in the
+    UI: a genuinely-missing field and a confirmed-zero field must stay
+    distinguishable all the way from extraction through to display."""
     employee_name: Optional[str] = None
     employee_pan: Optional[str] = None
     assessment_year: Optional[str] = None
     tax_regime_llm: Optional[str] = None  # "old" | "new", set only by LLM extraction
-    gross_salary: float = 0.0
-    salary_as_per_17_1: float = 0.0
-    perquisites_17_2: float = 0.0
-    profits_17_3: float = 0.0
-    hra_10_13a: float = 0.0
-    hra_received: float = 0.0
-    lta_10_5: float = 0.0
-    other_exempt_10: float = 0.0
-    total_exempt_10: float = 0.0
-    standard_deduction_16ia: float = 0.0
-    professional_tax_16iii: float = 0.0
-    income_under_salary: float = 0.0
-    house_property_loss: float = 0.0
-    other_sources_income: float = 0.0
-    sec_80c_claimed: float = 0.0
-    sec_80ccd_1_claimed: float = 0.0
-    sec_80d_claimed: float = 0.0
-    total_vi_a_claimed: float = 0.0
-    taxable_income_form16: float = 0.0
-    tax_payable_form16: float = 0.0
-    tds_deducted_form16: float = 0.0
+    gross_salary: Optional[float] = None
+    salary_as_per_17_1: Optional[float] = None
+    perquisites_17_2: Optional[float] = None
+    profits_17_3: Optional[float] = None
+    hra_10_13a: Optional[float] = None
+    hra_received: Optional[float] = None
+    lta_10_5: Optional[float] = None
+    other_exempt_10: Optional[float] = None
+    total_exempt_10: Optional[float] = None
+    standard_deduction_16ia: Optional[float] = None
+    professional_tax_16iii: Optional[float] = None
+    income_under_salary: Optional[float] = None
+    house_property_loss: Optional[float] = None
+    other_sources_income: Optional[float] = None
+    sec_80c_claimed: Optional[float] = None
+    sec_80ccd_1_claimed: Optional[float] = None
+    sec_80d_claimed: Optional[float] = None
+    total_vi_a_claimed: Optional[float] = None
+    taxable_income_form16: Optional[float] = None
+    tax_payable_form16: Optional[float] = None
+    tds_deducted_form16: Optional[float] = None
     raw_text_snippet: str = ""
 
 PART_A_PATTERNS = {
@@ -136,9 +141,10 @@ Return ONLY a single valid JSON object (no markdown fences, no commentary) with 
 }
 
 Rules:
-- Use 0 for any amount not present or not applicable — never omit a key.
+- Distinguish "confirmed zero" from "not found": use 0 ONLY when that line item actually appears on the document and its stated value is zero/nil (this is the common case for inapplicable Chapter VI-A rows etc. — a real Form 16 almost always prints "0.00" for them explicitly, which IS a confirmed zero). Use JSON null when that line item cannot be found anywhere in the document text at all — never use null just because a value is small or a section is inapplicable; inapplicable sections are still usually explicitly printed as 0.00, which is a confirmed zero, not null.
+- Never omit a key — every key above must be present, with either a number or null.
 - Numbers must be plain numbers: no currency symbols, no commas, no text.
-- If employee_name, employee_pan, or assessment_year are genuinely not determinable, use an empty string — never fabricate them.
+- If employee_name, employee_pan, or assessment_year are genuinely not determinable, use null — never fabricate them.
 - Return ONLY the JSON object. No explanation, no markdown code fences."""
 
 
@@ -227,6 +233,13 @@ def parse_form16(path: str) -> Form16Data:
         print(f"[FORM16-DEBUG] LLM extraction failed ({e!r}) — falling back to regex extraction", flush=True)
         return parse_form16_text(full_text)
 
+def _n(v: Optional[float]) -> float:
+    """Null-safe numeric coercion for arithmetic only — never use this to
+    decide whether a field was 'found'; check `is None` on the raw
+    Form16Data attribute for that instead (see extraction_meta below)."""
+    return v if v is not None else 0.0
+
+
 def form16_to_dict(data: Form16Data) -> dict:
     if data.tax_regime_llm in ("old", "new"):
         # LLM read the actual Yes/No answer to the 115BAC(1A) opt-out question.
@@ -240,34 +253,70 @@ def form16_to_dict(data: Form16Data) -> dict:
             regime = "old"
         elif any(k in text for k in ["new tax regime", "115bac(1a)", "default regime"]):
             regime = "new"
-    
+
+    # A field is only "missing" if it was truly never found — a fallback sum
+    # of sub-components counts as found too, since those sub-components were
+    # independently confirmed. Only flag the roll-up itself as missing when
+    # BOTH the top-line total AND every component are absent.
+    gross_salary_total = data.gross_salary
+    if gross_salary_total is None:
+        parts = [data.salary_as_per_17_1, data.perquisites_17_2, data.profits_17_3]
+        if any(p is not None for p in parts):
+            gross_salary_total = sum(_n(p) for p in parts)
+
+    total_exemptions = data.total_exempt_10
+    if total_exemptions is None:
+        parts = [data.hra_10_13a, data.lta_10_5, data.other_exempt_10]
+        if any(p is not None for p in parts):
+            total_exemptions = sum(_n(p) for p in parts)
+
+    total_vi_a = data.total_vi_a_claimed
+    if total_vi_a is None:
+        parts = [data.sec_80c_claimed, data.sec_80d_claimed]
+        if any(p is not None for p in parts):
+            total_vi_a = sum(_n(p) for p in parts)
+
+    missing_fields = [
+        attr for attr in (
+            "gross_salary", "hra_10_13a", "professional_tax_16iii",
+            "sec_80c_claimed", "sec_80d_claimed", "tds_deducted_form16",
+        )
+        if getattr(data, attr) is None
+    ]
+
     mapped = {
         "employee_name": data.employee_name,
         "employee_pan": data.employee_pan,
         "assessment_year": data.assessment_year or "2026-27",
         "tax_regime": regime,
-        "tds": data.tds_deducted_form16,
+        "tds": _n(data.tds_deducted_form16),
         "gross_salary": {
-            "salary_17_1":      data.salary_as_per_17_1,
-            "perquisites_17_2":  data.perquisites_17_2,
-            "profits_17_3":      data.profits_17_3,
-            "total":            data.gross_salary or (data.salary_as_per_17_1 + data.perquisites_17_2 + data.profits_17_3)
+            "salary_17_1":      _n(data.salary_as_per_17_1),
+            "perquisites_17_2":  _n(data.perquisites_17_2),
+            "profits_17_3":      _n(data.profits_17_3),
+            "total":            _n(gross_salary_total),
         },
-        "total_exemptions": data.total_exempt_10 or (data.hra_10_13a + data.lta_10_5 + data.other_exempt_10),
-        "hra_exempt": data.hra_10_13a,
-        "hra_received": data.hra_received,
-        "standard_deduction": data.standard_deduction_16ia or (75000.0 if regime == "new" else 50000.0),
-        "professional_tax": data.professional_tax_16iii,
+        "total_exemptions": _n(total_exemptions),
+        "hra_exempt": _n(data.hra_10_13a),
+        "hra_received": _n(data.hra_received),
+        "standard_deduction": data.standard_deduction_16ia if data.standard_deduction_16ia is not None
+                               else (75000.0 if regime == "new" else 50000.0),
+        "professional_tax": _n(data.professional_tax_16iii),
         "other_income": {
-            "house_property": data.house_property_loss,
-            "other_sources": data.other_sources_income,
-            "total": data.house_property_loss + data.other_sources_income
+            "house_property": _n(data.house_property_loss),
+            "other_sources": _n(data.other_sources_income),
+            "total": _n(data.house_property_loss) + _n(data.other_sources_income),
         },
         "chapter_6A": {
-            "80C": data.sec_80c_claimed,
-            "80D": data.sec_80d_claimed,
-            "total": data.total_vi_a_claimed or (data.sec_80c_claimed + data.sec_80d_claimed)
-        }
+            "80C": _n(data.sec_80c_claimed),
+            "80D": _n(data.sec_80d_claimed),
+            "total": _n(total_vi_a),
+        },
+        # Not rendered on the ITR-1 form itself — consumed by node_fill_form
+        # to build real per-field confidence_scores (source: "missing" vs
+        # "form16"), so the UI can show "₹0" for a confirmed zero and "—"
+        # only for a field that was genuinely never found.
+        "extraction_meta": {"missing_fields": missing_fields},
     }
     print(f"[FORM16-DEBUG] Final form16_to_dict() output:\n{json.dumps(mapped, indent=2, default=str)}", flush=True)
     return mapped

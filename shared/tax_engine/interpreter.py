@@ -22,6 +22,7 @@ PRIMITIVES = {
     "apply_rebate": _p.apply_rebate,
     "apply_surcharge": _p.apply_surcharge,
     "apply_cess": _p.apply_cess,
+    "round_statutory": _p.round_statutory,
 }
 
 

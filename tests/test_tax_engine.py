@@ -79,6 +79,56 @@ class TestNewRegime:
         assert result["total_tax"] == 1578720
 
 
+class TestStatutoryRounding:
+
+    def test_taxable_income_and_total_tax_round_to_nearest_10(self):
+        """
+        Sections 288A/288B: taxable income rounds to the nearest ₹10 (applied
+        BEFORE slabs run), and the final tax payable rounds to the nearest
+        ₹10 (applied AFTER cess) — intermediate sub-heads (slab tax, rebate,
+        cess) are never individually rounded.
+
+        Gross salary 16,50,007; standard deduction 75,000
+             -> raw taxable income = 15,75,007.
+        288A: last digit 7 -> rounds UP -> taxable income = 15,75,010.
+
+        Slabs on 15,75,010: 0-4L@0=0, 4-8L@5%=20,000, 8-12L@10%=40,000,
+             12L-15,75,010 (3,75,010)@15%=56,251.50
+             -> tax_before_rebate = 1,16,251.50.
+        Taxable income (15,75,010) > rebate threshold (12L) -> rebate = 0.
+        No surcharge. Cess = 1,16,251.50 * 4% = 4,650.06.
+        Raw total = 1,16,251.50 + 4,650.06 = 1,20,901.56.
+        288B: drop paise -> 1,20,901; last digit 1 -> rounds DOWN -> 1,20,900.
+        """
+        result = compute(AY, "new", {"gross_salary": 1650007})
+        assert result["taxable_income"] == 1575010
+        assert result["total_tax"] == 120900
+
+    def test_refund_or_payable_also_rounds_to_nearest_10(self):
+        """
+        288B covers "any amount payable and any refund due" — the net figure
+        after TDS is rounded too, not just total_tax on its own.
+
+        Reusing the scenario above (total_tax = 1,20,900 after rounding).
+        TDS = 1,25,003 -> raw refund = 1,25,003 - 1,20,900 = 4,103.
+        Last digit 3 -> rounds DOWN -> refund = 4,100.
+        """
+        from shared.tax_utils import compute_tax_from_engine
+
+        extracted = {
+            "employee_name": "Test Person",
+            "tax_regime": "new",
+            "tds": 125003,
+            "gross_salary": {"total": 1650007},
+            "other_income": {"house_property": 0, "other_sources": 0},
+            "chapter_6A": {"80C": 0, "80D": 0},
+        }
+        result = compute_tax_from_engine(extracted, ay=AY)
+        comp = result["computed"]
+        assert comp["total_tax_liability"] == 120900
+        assert comp["refund_or_payable"] == 4100
+
+
 class TestOldRegime:
 
     def test_deductions_capped_no_rebate(self):
