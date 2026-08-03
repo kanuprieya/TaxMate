@@ -75,8 +75,36 @@ class TestHousePropertyAggregation:
 
 class TestCapitalGains:
 
+    def test_equity_ltcg_fully_within_exemption_is_zero_tax(self):
+        """
+        Gross salary 1,00,000; standard deduction 75,000 -> net salary 25,000.
+        One equity LTCG transaction, 24 months held (>=12):
+             3,00,000 - 2,00,000 = 1,00,000 gain -> under the Rs 1,25,000
+             Sec 112A exemption threshold entirely.
+        GTI = 25,000 (salary) + 0 (HP) + 0 (no slab-taxed gains) = 25,000.
+        Taxable income 25,000 -> 0% slab -> tax_before_rebate=0, rebate=0,
+        tax_after_rebate=0.
+        Special-rate tax: LTCG112A taxable = max(0, 1,00,000-1,25,000) = 0
+             -> capital_gains_tax = 0. No surcharge, no cess on zero base.
+        total_tax = 0.
+        """
+        result = compute(AY, "new", {
+            "gross_salary": 100000,
+            "house_properties": [],
+            "capital_gains_raw": [
+                {"asset_type": "equity_stt", "holding_period_months": 24, "sale_value": 300000, "cost_of_acquisition": 200000},
+            ],
+        })
+        assert result["capital_gains"] == {"stcg_111a": 0.0, "ltcg_112a": 100000.0, "ltcg_112_other": 0.0}
+        assert result["capital_gains_tax"] == 0.0
+        assert result["total_tax"] == 0
+
     def test_special_rate_buckets_taxed_independently_of_slabs(self):
         """
+        Covers equity LTCG above the exemption (excess-only taxed), equity
+        STCG at the flat rate on the full gain, and non-equity LTCG at the
+        flat rate, together in one scenario.
+
         Gross salary 1,00,000; standard deduction 75,000 -> net salary 25,000.
         Four capital gains transactions:
           - equity, 6 months held (<12) -> STCG 111A: 5,00,000 - 3,00,000 = 2,00,000
@@ -108,6 +136,60 @@ class TestCapitalGains:
         assert result["capital_gains_tax"] == 249375.0
         assert result["taxable_income"] == 65000
         assert result["total_tax"] == 259350
+
+
+class TestCombinedScenario:
+
+    def test_salary_plus_partially_exempt_ltcg_plus_three_house_properties(self):
+        """
+        Most realistic end-to-end case: salary + one partially-exempt equity
+        LTCG + three house properties, one of which is a loss.
+
+        Salary: gross 15,00,000; standard deduction 75,000 -> net salary 14,25,000.
+
+        House properties:
+          P1 (let-out): annual value 4,00,000, municipal tax 20,000
+               -> NAV 3,80,000; 30% std ded 1,14,000; interest 50,000 (uncapped)
+               -> income = 3,80,000 - 1,14,000 - 50,000 = 2,16,000.
+          P2 (self-occupied, a loss): annual value 0, interest 1,80,000
+               (under the Rs 2,00,000 Sec 24(b) cap) -> income = -1,80,000.
+          P3 (let-out): annual value 2,50,000, municipal tax 10,000
+               -> NAV 2,40,000; 30% std ded 72,000; interest 30,000 (uncapped)
+               -> income = 2,40,000 - 72,000 - 30,000 = 1,38,000.
+          Combined = 2,16,000 - 1,80,000 + 1,38,000 = 1,74,000 (positive, so
+          the Sec 71(3A) Rs 2,00,000 loss-set-off cap never engages here).
+
+        Capital gains: one equity LTCG, 24 months held:
+             9,00,000 - 5,00,000 = 4,00,000 gain -> taxable excess over the
+             Rs 1,25,000 exemption = 2,75,000 -> tax = 2,75,000*12.5% = 34,375.
+
+        GTI = 14,25,000 (salary) + 1,74,000 (HP) + 0 (no slab-taxed gains)
+             = 15,99,000 = taxable income (new regime, no deductions, already
+             a multiple of 10).
+        Slabs on 15,99,000: 0-4L@0=0, 4-8L@5%=20,000, 8-12L@10%=40,000,
+             12L-15,99,000(3,99,000)@15%=59,850 -> tax_before_rebate=1,19,850.
+        Taxable income > 12L rebate threshold -> rebate=0 -> tax_after_rebate=1,19,850.
+        + capital_gains_tax 34,375 -> 1,54,225. No surcharge (well below 50L).
+        Cess = 1,54,225*4% = 6,169 -> raw total = 1,60,394.
+        288B: last digit 4 -> rounds down -> total_tax = 1,60,390.
+        """
+        result = compute(AY, "new", {
+            "gross_salary": 1500000,
+            "house_properties": [
+                {"annual_value": 400000, "municipal_tax_paid": 20000, "interest_on_loan_24b": 50000, "property_type": "let_out"},
+                {"annual_value": 0, "municipal_tax_paid": 0, "interest_on_loan_24b": 180000, "property_type": "self_occupied"},
+                {"annual_value": 250000, "municipal_tax_paid": 10000, "interest_on_loan_24b": 30000, "property_type": "let_out"},
+            ],
+            "capital_gains_raw": [
+                {"asset_type": "equity_stt", "holding_period_months": 24, "sale_value": 900000, "cost_of_acquisition": 500000},
+            ],
+        })
+        assert result["house_property_income"] == 174000
+        assert result["house_property_loss_carried_forward"] == 0.0
+        assert result["capital_gains"] == {"stcg_111a": 0.0, "ltcg_112a": 400000.0, "ltcg_112_other": 0.0}
+        assert result["capital_gains_tax"] == 34375.0
+        assert result["taxable_income"] == 1599000
+        assert result["total_tax"] == 160390
 
 
 class TestComputeTaxFromEngineItr2:
