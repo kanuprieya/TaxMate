@@ -184,14 +184,20 @@ def apply_cess(state: dict, params: dict) -> dict:
 
 # ── ITR-2-only primitives ────────────────────────────────────────────────────
 # Everything below exists because ITR-2 filers can have income the 7 primitives
-# above were never meant to model: multiple house properties, capital gains
-# taxed at special rates instead of slab rates, and foreign income eligible for
-# DTAA relief. Each is a genuinely new computation mechanism (same rationale
-# that justified round_statutory as an 8th primitive), not a variant of an
-# existing one — so each gets its own primitive rather than a branch inside
-# aggregate_gross_income/apply_slabs/apply_cess, which stay untouched and keep
-# serving ITR-1 exactly as before. ITR-2 configs are simply free to place these
-# alongside the original 8 in their own `steps` list.
+# above were never meant to model: multiple house properties, and capital
+# gains taxed at special rates instead of slab rates. Each is a genuinely new
+# computation mechanism (same rationale that justified round_statutory as an
+# 8th primitive), not a variant of an existing one — so each gets its own
+# primitive rather than a branch inside aggregate_gross_income/apply_slabs/
+# apply_cess, which stay untouched and keep serving ITR-1 exactly as before.
+# ITR-2 configs are simply free to place these alongside the original 8 in
+# their own `steps` list.
+#
+# Foreign income/assets (Schedule FA/FSI, DTAA relief) are explicitly OUT OF
+# SCOPE — deliberately not a primitive here. graph/router.py detects and
+# flags those filings for a tax professional before either graph runs, rather
+# than attempting a computation that would need far more care to get right
+# than this scaffold has budget for.
 #
 # Known simplifications (first-cut scaffold, not a certified compliance
 # engine — flagged here rather than left implicit):
@@ -199,10 +205,17 @@ def apply_cess(state: dict, params: dict) -> dict:
 #     within their own bucket and short-term loss offsets long-term gain, but
 #     inter-year carry-forward is only surfaced as a number, not tracked
 #     across filing years.
-#   - The indexation/rate transition introduced by the Finance Act 2024 (LTCG
-#     on land/building/unlisted shares acquired before 23-Jul-2024 can choose
-#     indexed 20% vs unindexed 12.5%) is not modelled — configs pick one rate
-#     path and apply it uniformly.
+#   - The indexation/rate transition introduced by the Finance Act 2024 is
+#     not modelled. Verified against current sources (Jul 2026): the flat
+#     12.5%-no-indexation rate this engine always applies to ltcg_112_other
+#     is correct as the general case, but resident individuals/HUFs holding
+#     LAND OR BUILDINGS ONLY acquired before 23-Jul-2024 may instead elect
+#     20%-with-indexation if it's lower — that election is not offered here,
+#     so such filers may see a higher computed LTCG tax than they're
+#     entitled to minimize. This grandfathering does NOT extend to unlisted
+#     shares, gold, bonds, or debt mutual funds, which get the flat 12.5%
+#     with no transition option regardless of acquisition date — configs
+#     pick the single correct-for-most-cases rate and apply it uniformly.
 #   - Surcharge here reuses the plain apply_surcharge primitive; the special
 #     15% surcharge cap that applies specifically to capital-gains/dividend
 #     income regardless of the taxpayer's slab is not separately enforced.
@@ -355,32 +368,4 @@ def apply_special_rate_capital_gains_tax(state: dict, params: dict) -> dict:
     capital_gains_tax = round(stcg_111a_tax + ltcg_112a_tax + ltcg_112_other_tax, 2)
     state["capital_gains_tax"] = capital_gains_tax
     state["tax_after_rebate"] = round(state.get("tax_after_rebate", 0.0) + capital_gains_tax, 2)
-    return state
-
-
-def apply_foreign_tax_credit(state: dict, params: dict) -> dict:
-    """Sec 90/91 DTAA foreign tax credit relief: the lower of (foreign tax
-    actually paid) and (the proportionate share of Indian tax attributable to
-    that foreign income). Runs AFTER apply_cess since relief is granted
-    against final tax liability including cess (Rule 128), and writes
-    'total_tax' directly since it's the last step before rounding.
-
-    state['foreign_income']: {foreign_income_amount, foreign_tax_paid}
-    """
-    state = dict(state)
-    fi = state.get("foreign_income", {})
-    foreign_income_amount = fi.get("foreign_income_amount", 0.0)
-    foreign_tax_paid = fi.get("foreign_tax_paid", 0.0)
-
-    taxable_income = state.get("taxable_income", 0.0)
-    total_tax = state.get("total_tax", 0.0)
-
-    if taxable_income > 0 and foreign_income_amount > 0:
-        proportionate_indian_tax = total_tax * (foreign_income_amount / taxable_income)
-        relief = round(min(foreign_tax_paid, proportionate_indian_tax), 2)
-    else:
-        relief = 0.0
-
-    state["foreign_tax_credit_relief"] = relief
-    state["total_tax"] = round(max(0.0, total_tax - relief), 2)
     return state

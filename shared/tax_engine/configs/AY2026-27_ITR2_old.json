@@ -2,7 +2,7 @@
   "ay": "AY2026-27",
   "regime": "old",
   "form_type": "itr2",
-  "_comment": "Same statutory slabs/rebate/surcharge/cess/deduction caps as AY2026-27_old.json plus the ITR-2-only steps: aggregate_house_properties and compute_capital_gains run first, apply_deductions/compute_taxable_income are the original unmodified primitives, apply_special_rate_capital_gains_tax and apply_foreign_tax_credit are new steps with no ITR-1 equivalent. See shared/tax_engine/primitives.py for the simplifications each new primitive documents.",
+  "_comment": "Same statutory slabs/rebate/surcharge/cess/deduction caps as AY2026-27_old.json plus the ITR-2-only steps: aggregate_house_properties and compute_capital_gains run first, apply_deductions/compute_taxable_income are the original unmodified primitives, apply_special_rate_capital_gains_tax is a new step with no ITR-1 equivalent. Foreign income/assets (Schedule FA/FSI) are out of scope by design and never reach this config — see graph/router.py's is_out_of_scope(). See shared/tax_engine/primitives.py for the simplifications each new primitive documents.",
   "steps": [
     { "op": "aggregate_house_properties", "params": {} },
     { "op": "compute_capital_gains", "params": { "equity_ltcg_months": 12, "other_ltcg_months": 24 } },
@@ -52,7 +52,6 @@
       }
     },
     { "op": "apply_cess", "params": { "rate": 0.04 } },
-    { "op": "apply_foreign_tax_credit", "params": {} },
     { "op": "round_statutory", "params": { "field": "total_tax" } }
   ]
 }

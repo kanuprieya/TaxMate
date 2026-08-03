@@ -3,9 +3,11 @@ ITR-2 LangGraph Agent Pipeline
 ================================
 Separate pipeline from graph/itr_graph.py (ITR-1) rather than a branch inside
 it, per the project's ITR-1/ITR-2 separation plan — the two forms diverge
-enough (multiple house properties, capital gains, foreign income) that
-sharing one graph would mean conditionals threaded through every node.
-graph/router.py is the only place that decides which of the two to invoke.
+enough (multiple house properties, capital gains) that sharing one graph
+would mean conditionals threaded through every node. graph/router.py is the
+only place that decides which of the two to invoke — and it also flags and
+redirects foreign-income filings before either graph runs, so this pipeline
+never sees a foreign-income document.
 
 State machine:
   fill_form → compare_regimes → validate → score_confidence → explain → done
@@ -36,7 +38,7 @@ from shared.validator import TaxConfig
 class ITR2AgentState(TypedDict):
     session_id:          str
     ay:                  str
-    raw_documents:       list[dict]    # outputs from doc-parser: form16 + capital_gains + property + foreign_income
+    raw_documents:       list[dict]    # outputs from doc-parser: form16 + capital_gains + property
     itr2_form:           dict          # serialised ITR2Form
     regime_analysis:     dict
     validation_flags:    list[dict]
@@ -52,9 +54,8 @@ class ITR2AgentState(TypedDict):
 
 def _merge_docs(docs: list[dict], doc_type: str, list_field: str) -> list:
     """ITR-2 filers can upload more than one capital-gains statement, more
-    than one property, more than one foreign-income source — each becomes its
-    own parsed document, so this merges all of a given doc_type's list_field
-    into one flat list for the engine."""
+    than one property — each becomes its own parsed document, so this merges
+    all of a given doc_type's list_field into one flat list for the engine."""
     merged: list = []
     for d in docs:
         if d.get("doc_type") == doc_type:
@@ -65,9 +66,9 @@ def _merge_docs(docs: list[dict], doc_type: str, list_field: str) -> list:
 # ── Node 1: Merge documents into ITR-2 form ────────────────────────────────────
 
 def node_fill_form(state: ITR2AgentState) -> dict:
-    """Maps parsed documents (Form 16 + capital gains + property + foreign
-    income) onto ITR-2 fields via the same config-driven engine ITR-1 uses,
-    routed through the ITR-2 configs/primitives instead."""
+    """Maps parsed documents (Form 16 + capital gains + property) onto
+    ITR-2 fields via the same config-driven engine ITR-1 uses, routed through
+    the ITR-2 configs/primitives instead."""
     docs = state["raw_documents"]
     form = ITR2Form()
     audit = list(state.get("audit_trail", []))
@@ -83,8 +84,6 @@ def node_fill_form(state: ITR2AgentState) -> dict:
 
     extracted["house_properties"] = _merge_docs(docs, "property", "house_properties")
     extracted["capital_gains_raw"] = _merge_docs(docs, "capital_gains", "capital_gains_raw")
-    extracted["foreign_income"] = _merge_docs(docs, "foreign_income", "foreign_income")
-    foreign_assets = _merge_docs(docs, "foreign_income", "foreign_assets")
 
     ay_str = extracted.get("assessment_year") or state.get("ay", "AY2026-27")
     if not ay_str.startswith("AY"): ay_str = f"AY{ay_str}"
@@ -130,8 +129,6 @@ def node_fill_form(state: ITR2AgentState) -> dict:
         form.capital_gains_summary.ltcg_112a = float_safe(cg.get("ltcg_112a", 0.0))
         form.capital_gains_summary.ltcg_112_other = float_safe(cg.get("ltcg_112_other", 0.0))
         form.capital_gains_summary.capital_gains_tax = val("capital_gains_tax")
-
-        form.foreign_tax_credit_relief = val("foreign_tax_credit_relief")
 
         if analysis["regime_used"] == "old":
             form.deductions.sec_80c = extracted.get("chapter_6A", {}).get("80C", 0.0)
@@ -325,10 +322,6 @@ def node_explain(state: ITR2AgentState) -> dict:
     total_tax = tax_comp.get("total_tax_liability", 0.0)
     lines.append(f"3. Taxable Income (slab-rate portion): Rs {taxable_income:,.0f}")
     lines.append(f"   = **Total Tax Liability: Rs {total_tax:,.0f}**")
-
-    ftc = form.get("foreign_tax_credit_relief", 0.0)
-    if ftc > 0:
-        lines.append(f"   (-) Foreign Tax Credit (Sec 90/91): Rs {ftc:,.0f}")
 
     lines.append("")
     refund = tax_comp.get("refund", 0.0)

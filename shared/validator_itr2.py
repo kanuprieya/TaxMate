@@ -2,10 +2,12 @@
 ITR-2 validation
 ===================
 Mirrors shared/validator.py's TaxValidator, but for ITR-2's broader income
-shape (multiple house properties, capital gains, foreign income) instead of
-salary-only. Reuses the ValidationResult/TaxConfig shapes from
-shared/validator.py by import (read-only) so both validators plug into their
-respective graphs the same way — shared/validator.py itself is not modified.
+shape (multiple house properties, capital gains) instead of salary-only.
+Foreign income is out of scope (see graph/router.py's is_out_of_scope()) and
+never reaches this validator. Reuses the ValidationResult/TaxConfig shapes
+from shared/validator.py by import (read-only) so both validators plug into
+their respective graphs the same way — shared/validator.py itself is not
+modified.
 """
 
 from typing import Dict, Any
@@ -70,23 +72,13 @@ class ITR2Validator:
             if float(cg.get(bucket, 0)) < 0:
                 result.errors.append(f"Capital gains bucket '{bucket}' computed negative — set-off logic failed")
 
-        # ---- 6. Foreign income disclosure ----
-        foreign_tax_paid = 0.0
-        for entry in extracted.get("foreign_income", []) or []:
-            foreign_tax_paid += float(entry.get("foreign_tax_paid", 0) or 0)
-        if foreign_tax_paid > 0 and not extracted.get("foreign_assets"):
-            result.warnings.append(
-                "Foreign tax credit claimed but no Schedule FA (foreign asset) disclosure found — "
-                "FA disclosure is mandatory for residents regardless of income earned."
-            )
-
-        # ---- 7. Computation consistency ----
+        # ---- 6. Computation consistency ----
         gross_total_income = float(computed.get("gross_total_income", 0))
         total_income = float(computed.get("taxable_income", 0))
         if total_income > gross_total_income + 5 and gross_total_income > 0:
             result.errors.append("Total taxable income exceeds gross total income")
 
-        # ---- 8. Final scoring ----
+        # ---- 7. Final scoring ----
         if result.errors:
             result.status = "needs_review"
             result.integrity_score -= 50

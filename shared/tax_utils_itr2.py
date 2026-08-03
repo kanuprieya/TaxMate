@@ -3,8 +3,10 @@ ITR-2 tax computation glue
 =============================
 Mirrors shared/tax_utils.py::compute_tax_from_engine, but drives the
 *_ITR2_*.json configs and feeds the ITR-2-only primitives (house properties,
-capital gains, foreign tax credit) in addition to the same salary/other-income
-mapping ITR-1 uses.
+capital gains) in addition to the same salary/other-income mapping ITR-1
+uses. Foreign income/assets are explicitly out of scope — graph/router.py's
+is_out_of_scope() flags and redirects those filings before this function is
+ever called, so it has no foreign-income handling to carry.
 
 Reuses shared.tax_utils's private Form16-shape mapper and float_safe by
 import (read-only) rather than duplicating it — shared/tax_utils.py itself
@@ -17,20 +19,13 @@ from shared.tax_utils import _extracted_to_engine_inputs, float_safe
 from shared.tax_engine import compute as _engine_compute, itr2_ay as _itr2_config_ay
 
 
-def _sum_foreign_income(entries: list[dict]) -> dict:
-    return {
-        "foreign_income_amount": sum(float_safe(e.get("foreign_income_amount", 0.0)) for e in entries),
-        "foreign_tax_paid":      sum(float_safe(e.get("foreign_tax_paid", 0.0)) for e in entries),
-    }
-
-
 def compute_tax_from_engine_itr2(extracted: dict, ay: str = "AY2026-27") -> dict:
     """Runs the ITR-2 primitive/config tax engine against merged extraction
-    data (Form 16 + Schedule HP/CG/FA documents) and reshapes the result into
+    data (Form 16 + Schedule HP/CG documents) and reshapes the result into
     the same 'computed' dict shape ITR-1's compute_tax_from_engine produces,
-    plus the ITR-2-only fields (capital_gains, house_property_loss_carried_forward,
-    foreign_tax_credit_relief) so downstream consumers can rely on a superset
-    shape rather than a different one.
+    plus the ITR-2-only fields (capital_gains, house_property_loss_carried_forward)
+    so downstream consumers can rely on a superset shape rather than a
+    different one.
     """
     raw_name = extracted.get("employee_name") or ""
     if not raw_name.strip():
@@ -52,12 +47,6 @@ def compute_tax_from_engine_itr2(extracted: dict, ay: str = "AY2026-27") -> dict
     inputs = _extracted_to_engine_inputs(extracted)
     inputs["house_properties"] = extracted.get("house_properties", [])
     inputs["capital_gains_raw"] = extracted.get("capital_gains_raw", [])
-
-    foreign_income_entries = extracted.get("foreign_income", [])
-    inputs["foreign_income"] = (
-        _sum_foreign_income(foreign_income_entries) if isinstance(foreign_income_entries, list)
-        else foreign_income_entries
-    )
 
     try:
         state = _engine_compute(_itr2_config_ay(ay), regime, inputs)
@@ -94,7 +83,6 @@ def compute_tax_from_engine_itr2(extracted: dict, ay: str = "AY2026-27") -> dict
         "house_property_loss_carried_forward": state.get("house_property_loss_carried_forward", 0.0),
         "capital_gains":       state.get("capital_gains", {}),
         "capital_gains_tax":   state.get("capital_gains_tax", 0.0),
-        "foreign_tax_credit_relief": state.get("foreign_tax_credit_relief", 0.0),
         "gross_total_income":  state.get("gross_total_income", 0.0),
         "taxable_income":      state.get("taxable_income", 0.0),
         "tax_before_rebate":   state.get("tax_before_rebate", 0.0),

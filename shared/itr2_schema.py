@@ -1,8 +1,11 @@
 """
 ITR-2 Form Schema — AY 2026-27
 =================================
-Pydantic models for the ITR-2-only sections: multiple house properties,
-Schedule CG (capital gains), and Schedule FA / FSI (foreign assets & income).
+Pydantic models for the ITR-2-only sections: multiple house properties and
+Schedule CG (capital gains). Schedule FA/FSI (foreign assets & income) is
+explicitly out of scope — graph/router.py's is_out_of_scope() flags and
+redirects those filings before an ITR2Form is ever built, so there's no
+foreign-income schema here to leave unused.
 
 Everything reusable from ITR-1 (personal info, salary, deductions, TDS, tax
 computation, confidence/validation shapes) is imported directly from
@@ -35,8 +38,7 @@ __all__ = [
     "TaxRegime", "FilingStatus", "ResidentialStatus", "PersonalInfo",
     "SalaryIncome", "OtherSourcesIncome", "Deductions", "TDSEntry",
     "TaxComputation", "FieldConfidence", "ValidationFlag",
-    "HousePropertyEntry", "CapitalGainsEntry", "ForeignIncomeEntry",
-    "ForeignAsset", "ITR2Form",
+    "HousePropertyEntry", "CapitalGainsEntry", "ITR2Form",
 ]
 
 # ── Section: Schedule HP (multiple house properties) ─────────────────────────
@@ -91,36 +93,12 @@ class CapitalGainsSummary(BaseModel):
     capital_gains_tax: float = 0.0
 
 
-# ── Section: Schedule FA / FSI (foreign assets & income) ─────────────────────
-
-class ForeignAsset(BaseModel):
-    """One entry in Schedule FA (foreign asset disclosure — mandatory
-    regardless of whether it generated income, for residents)."""
-
-    country:                  Optional[str] = None
-    asset_type:                Optional[str] = None   # bank_account / equity / etc.
-    peak_value:                 float = 0.0
-    closing_value:              float = 0.0
-
-
-class ForeignIncomeEntry(BaseModel):
-    """Schedule FSI — foreign-source income eligible for Sec 90/91 DTAA
-    relief. holding a per-country breakdown; the engine sums these into the
-    flat 'foreign_income' dict its apply_foreign_tax_credit primitive reads."""
-
-    country:                  Optional[str] = None
-    income_type:                Optional[str] = None   # salary / dividend / capital_gains / other
-    foreign_income_amount:      float = 0.0
-    foreign_tax_paid:           float = 0.0
-    dtaa_article:                Optional[str] = None
-
-
 # ── Master ITR-2 Form ─────────────────────────────────────────────────────────
 
 class ITR2Form(BaseModel):
-    """Complete ITR-2 form. Structurally the same shape as ITR1Form for the
-    sections they share, plus Schedule HP as a list, Schedule CG, and
-    Schedule FA/FSI."""
+    """Complete ITR-2 form (excluding Schedule FA/FSI — out of scope; see
+    module docstring). Structurally the same shape as ITR1Form for the
+    sections they share, plus Schedule HP as a list and Schedule CG."""
 
     personal_info:        PersonalInfo               = Field(default_factory=PersonalInfo)
     salary_income:        SalaryIncome               = Field(default_factory=SalaryIncome)
@@ -131,9 +109,6 @@ class ITR2Form(BaseModel):
     other_sources:        OtherSourcesIncome         = Field(default_factory=OtherSourcesIncome)
     deductions:            Deductions                 = Field(default_factory=Deductions)
     tds_details:           list[TDSEntry]             = Field(default_factory=list)
-    foreign_assets:        list[ForeignAsset]         = Field(default_factory=list)
-    foreign_income:        list[ForeignIncomeEntry]   = Field(default_factory=list)
-    foreign_tax_credit_relief: float                  = 0.0
     tax_computation:       TaxComputation             = Field(default_factory=TaxComputation)
 
     confidence_scores:    dict[str, FieldConfidence] = Field(default_factory=dict)

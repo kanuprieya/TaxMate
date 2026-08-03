@@ -3,9 +3,10 @@ Test harness — ITR-2 primitives/config vs. hand-verified scenarios
 =====================================================================
 Mirrors tests/test_tax_engine.py's style (hand-verified slab arithmetic in
 comments) but exercises the ITR-2-only primitives (aggregate_house_properties,
-compute_capital_gains, apply_special_rate_capital_gains_tax,
-apply_foreign_tax_credit) and the *_ITR2_*.json configs. Does not modify or
-duplicate tests/test_tax_engine.py — this is a new file for a new pipeline.
+compute_capital_gains, apply_special_rate_capital_gains_tax) and the
+*_ITR2_*.json configs. Does not modify or duplicate tests/test_tax_engine.py
+— this is a new file for a new pipeline. Foreign income/assets are out of
+scope by design — see tests/test_router.py for that flag-and-redirect path.
 
 Run:
     pytest tests/test_tax_engine_itr2.py -v
@@ -107,32 +108,6 @@ class TestCapitalGains:
         assert result["capital_gains_tax"] == 249375.0
         assert result["taxable_income"] == 65000
         assert result["total_tax"] == 259350
-
-
-class TestForeignTaxCredit:
-
-    def test_relief_capped_at_proportionate_indian_tax(self):
-        """
-        Gross salary 20,00,000; standard deduction 75,000 -> net salary 19,25,000
-             = GTI = taxable income (no HP/CG/deductions).
-        Slabs: 0-4L@0=0, 4-8L@5%=20,000, 8-12L@10%=40,000, 12-16L@15%=60,000,
-             16L-19,25,000(3,25,000)@20%=65,000 -> tax_before_rebate=1,85,000.
-        Taxable income > 12L rebate threshold -> rebate=0. No capital gains,
-        no surcharge (<50L). Cess = 1,85,000*4%=7,400 -> total_tax pre-FTC = 1,92,400.
-        Foreign income declared: Rs 3,85,000 (exactly 20% of taxable income)
-             -> proportionate Indian tax = 1,92,400 * 20% = 38,480.
-        Foreign tax actually paid (50,000) exceeds that, so relief is capped
-        at the proportionate share: 38,480.
-        total_tax = 1,92,400 - 38,480 = 1,53,920 (already a multiple of 10).
-        """
-        result = compute(AY, "new", {
-            "gross_salary": 2000000,
-            "house_properties": [],
-            "capital_gains_raw": [],
-            "foreign_income": {"foreign_income_amount": 385000, "foreign_tax_paid": 50000},
-        })
-        assert result["foreign_tax_credit_relief"] == 38480.0
-        assert result["total_tax"] == 153920
 
 
 class TestComputeTaxFromEngineItr2:

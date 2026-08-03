@@ -28,7 +28,6 @@ PRIMITIVES = {
     "aggregate_house_properties": _p.aggregate_house_properties,
     "compute_capital_gains": _p.compute_capital_gains,
     "apply_special_rate_capital_gains_tax": _p.apply_special_rate_capital_gains_tax,
-    "apply_foreign_tax_credit": _p.apply_foreign_tax_credit,
 }
 
 
