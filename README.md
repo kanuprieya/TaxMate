@@ -361,6 +361,31 @@ Each assessment year gets its own FAISS namespace:
 
 When new AY drops: ingest new PDFs → run embedder with `--ay AY2025-26` → only the RAG service redeploys. No other service is touched.
 
+### ITR-2 namespace (capital gains + house property)
+
+Same pipeline, a separate namespace: `AY2026-27_ITR2` (via `shared/tax_engine`'s `itr2_ay()` suffix convention — `{ay}_ITR2`, not a new naming scheme). Everything under this namespace stays scoped to the ITR-2-only sections — Schedule CG (Sec 111A/112/112A) and Schedule HP (multiple house properties) — since ITR-1 topics are already covered by the base namespace above.
+
+Ingestion is `knowledge-base/build_itr2_kb.py` rather than `scraper.py`, because two of its six sources need a different fetch path: incometax.gov.in is still server-rendered (plain `curl` + BeautifulSoup, same as ITR-1), but cleartax.in's capital-gains/house-property articles turned out to be a client-rendered Next.js SPA with no article content in the raw HTML at all — confirmed by inspection, not assumed. Their content is captured verbatim in the script instead (see its module docstring for the rationale, the same workaround `manual_fallback.py` already documents for anti-bot-blocked pages).
+
+```
+knowledge-base/build_itr2_kb.py    → rag_output/itr2/{raw,chunks,combined}/all_chunks.jsonl
+knowledge-base/pdf_ingester.py --form-type itr2   → same output dir, for any PDFs dropped in pdfs/itr2/
+knowledge-base/embedder.py --form-type itr2       → vector_store/AY2026-27_ITR2.faiss + .meta.json
+knowledge-base/verify_itr2_retrieval.py           → sanity-checks the built index against 5 known-answer queries
+```
+
+Sources currently ingested (46 chunks total):
+
+| Source | Covers |
+|--------|--------|
+| incometax.gov.in — ITR-2 User Manual & FAQs | Filing procedure, eligibility, required documents |
+| cleartax.in/s/short-term-capital-gain-on-shares | Section 111A — equity STCG, 20% rate |
+| cleartax.in/s/long-term-capital-gains-on-shares | Section 112A — equity LTCG, 12.5% rate, ₹1.25L exemption |
+| cleartax.in/s/section-112-... | Section 112 — non-equity LTCG |
+| cleartax.in/s/house-property | Schedule HP — self-occupied/let-out/deemed-let-out, multiple properties |
+
+Rebuild from scratch: `python build_itr2_kb.py && python embedder.py --backend huggingface --form-type itr2 && python verify_itr2_retrieval.py`.
+
 ---
 
 ## 5. The agent pipeline
