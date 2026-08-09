@@ -53,7 +53,13 @@ PDF_DIR      = Path(__file__).parent / "pdfs"
 CHUNKS_DIR   = Path(__file__).parent / "rag_output" / "chunks"
 COMBINED     = Path(__file__).parent / "rag_output" / "combined" / "all_chunks.jsonl"
 
-for d in [PDF_DIR, CHUNKS_DIR, COMBINED.parent]:
+# ITR-2-only equivalents — same directory shape, nested under rag_output/itr2/
+# to match build_itr2_kb.py and embedder.py's --form-type itr2 default paths.
+PDF_DIR_ITR2    = Path(__file__).parent / "pdfs" / "itr2"
+CHUNKS_DIR_ITR2 = Path(__file__).parent / "rag_output" / "itr2" / "chunks"
+COMBINED_ITR2   = Path(__file__).parent / "rag_output" / "itr2" / "combined" / "all_chunks.jsonl"
+
+for d in [PDF_DIR, CHUNKS_DIR, COMBINED.parent, PDF_DIR_ITR2, CHUNKS_DIR_ITR2, COMBINED_ITR2.parent]:
     d.mkdir(parents=True, exist_ok=True)
 
 
@@ -126,6 +132,50 @@ PDF_METADATA_MAP = [
     },
 ]
 
+# ── ITR-2-only PDF metadata (Schedule CG / capital gains, Schedule HP) ─────────
+# Same lookup mechanism as PDF_METADATA_MAP above — matched in order, first
+# hit wins. Kept as a separate list (rather than appended to the one above)
+# so ITR-1 ingestion runs are never affected by patterns that only make sense
+# once capital-gains documents exist.
+
+PDF_METADATA_MAP_ITR2 = [
+    {
+        "pattern":     r"itr.?2.*(instruction|booklet)",
+        "source":      "CBDT — ITR-2 Instructions Booklet",
+        "doc_type":    "official_instructions",
+        "section":     "Filing Instructions",
+        "authority":   "CBDT",
+    },
+    {
+        "pattern":     r"(111a|112a|stcg|ltcg|capital.?gain)",
+        "source":      "Income Tax Act 1961 — Capital Gains Provisions (Sec 111A/112/112A)",
+        "doc_type":    "legislation",
+        "section":     "Capital Gains — Schedule CG",
+        "authority":   "Parliament of India",
+    },
+    {
+        "pattern":     r"(schedule.?cg|capital.?gains.?statement|contract.?note|broker.?statement)",
+        "source":      "Capital Gains Statement",
+        "doc_type":    "supporting_document",
+        "section":     "Schedule CG",
+        "authority":   "Broker/RTA",
+    },
+    {
+        "pattern":     r"(house.?propert|schedule.?hp|rent.?receipt|interest.?certificate|home.?loan)",
+        "source":      "House Property / Home Loan Interest Certificate Reference",
+        "doc_type":    "supplementary_guide",
+        "section":     "Schedule HP",
+        "authority":   "CBDT",
+    },
+    {
+        "pattern":     r"section.?54",
+        "source":      "Income Tax Act 1961 — Capital Gains Exemptions (Sec 54/54EC/54F)",
+        "doc_type":    "legislation",
+        "section":     "Capital Gains — Exemptions",
+        "authority":   "Parliament of India",
+    },
+]
+
 FALLBACK_METADATA = {
     "source":    "PDF Document",
     "doc_type":  "supplementary_guide",
@@ -134,9 +184,10 @@ FALLBACK_METADATA = {
 }
 
 
-def _detect_metadata(filename: str) -> dict:
+def _detect_metadata(filename: str, form_type: str = "itr1") -> dict:
     name = filename.lower()
-    for rule in PDF_METADATA_MAP:
+    rules = PDF_METADATA_MAP_ITR2 if form_type == "itr2" else PDF_METADATA_MAP
+    for rule in rules:
         if re.search(rule["pattern"], name, re.IGNORECASE):
             return {k: v for k, v in rule.items() if k != "pattern"}
     return FALLBACK_METADATA.copy()
@@ -301,10 +352,12 @@ def ingest_pdf(
     pdf_path: Path,
     ay:       str  = "AY2026-27",
     source_override: str = "",
+    form_type: str = "itr1",
+    chunks_dir: Path = CHUNKS_DIR,
 ) -> list[dict]:
     print(f"\n  Processing: {pdf_path.name}")
 
-    meta = _detect_metadata(pdf_path.name)
+    meta = _detect_metadata(pdf_path.name, form_type)
     if source_override:
         meta["source"] = source_override
 
@@ -330,7 +383,7 @@ def ingest_pdf(
     print(f"  ✓ {len(chunks)} chunks created")
 
     # Save individual chunk file
-    out_path = CHUNKS_DIR / f"pdf_{file_id}_chunks.json"
+    out_path = chunks_dir / f"pdf_{file_id}_chunks.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(chunks, f, ensure_ascii=False, indent=2)
     print(f"  ✓ Saved → {out_path}")
@@ -338,19 +391,19 @@ def ingest_pdf(
     return chunks
 
 
-def rebuild_combined():
+def rebuild_combined(chunks_dir: Path = CHUNKS_DIR, combined: Path = COMBINED):
     """Merge ALL chunk files (web + PDF) into single JSONL for embedding."""
     all_chunks = []
-    for path in sorted(CHUNKS_DIR.glob("*_chunks.json")):
+    for path in sorted(chunks_dir.glob("*_chunks.json")):
         with open(path, encoding="utf-8") as f:
             chunks = json.load(f)
             all_chunks.extend(chunks)
 
-    with open(COMBINED, "w", encoding="utf-8") as f:
+    with open(combined, "w", encoding="utf-8") as f:
         for c in all_chunks:
             f.write(json.dumps(c, ensure_ascii=False) + "\n")
 
-    print(f"\n✓ Combined JSONL rebuilt → {COMBINED}")
+    print(f"\n✓ Combined JSONL rebuilt → {combined}")
     print(f"  Total chunks: {len(all_chunks)}")
 
     # Source breakdown
@@ -365,14 +418,32 @@ def rebuild_combined():
 
 def main():
     parser = argparse.ArgumentParser(description="Ingest PDF files into RAG knowledge base")
-    parser.add_argument("--dir",    default=str(PDF_DIR), help="Directory of PDFs to ingest")
+    parser.add_argument("--dir",    default=None, help="Directory of PDFs to ingest (default depends on --form-type)")
     parser.add_argument("--file",   help="Single PDF file to ingest")
     parser.add_argument("--source", help="Override source name for --file")
-    parser.add_argument("--ay",     default="AY2026-27", help="Assessment Year namespace")
+    parser.add_argument("--ay",     default=None, help="Assessment Year namespace (default: AY2026-27, or AY2026-27_ITR2 when --form-type itr2)")
+    parser.add_argument(
+        "--form-type", choices=["itr1", "itr2"], default="itr1",
+        help="Which form's PDF metadata rules + output paths to use (default: itr1). "
+             "Mirrors embedder.py's --form-type flag: itr2 reads/writes rag_output/itr2/ "
+             "and knowledge-base/pdfs/itr2/, and matches capital-gains/house-property "
+             "documents against PDF_METADATA_MAP_ITR2 instead of PDF_METADATA_MAP."
+    )
     args = parser.parse_args()
 
-    print(f"\n📄 PDF Ingester — ITR-1 Knowledge Base")
-    print(f"   AY namespace: {args.ay}")
+    if args.form_type == "itr2":
+        ay         = args.ay or "AY2026-27_ITR2"
+        pdf_dir    = Path(args.dir) if args.dir else PDF_DIR_ITR2
+        chunks_dir = CHUNKS_DIR_ITR2
+        combined   = COMBINED_ITR2
+    else:
+        ay         = args.ay or "AY2026-27"
+        pdf_dir    = Path(args.dir) if args.dir else PDF_DIR
+        chunks_dir = CHUNKS_DIR
+        combined   = COMBINED
+
+    print(f"\n📄 PDF Ingester — {args.form_type.upper()} Knowledge Base")
+    print(f"   AY namespace: {ay}")
 
     all_chunks: list[dict] = []
 
@@ -381,33 +452,38 @@ def main():
         if not path.exists():
             print(f"File not found: {path}")
             return
-        chunks = ingest_pdf(path, args.ay, args.source or "")
+        chunks = ingest_pdf(path, ay, args.source or "", form_type=args.form_type, chunks_dir=chunks_dir)
         all_chunks.extend(chunks)
     else:
-        pdf_dir = Path(args.dir)
-        pdfs    = sorted(pdf_dir.glob("*.pdf"))
+        pdfs = sorted(pdf_dir.glob("*.pdf"))
         if not pdfs:
             print(f"\nNo PDFs found in {pdf_dir}/")
             print("Put your downloaded PDFs there and re-run.")
             print(f"\nExpected files (names don't need to match exactly):")
-            print("  itr1_instructions_AY2024-25.pdf")
-            print("  circular_03_2025.pdf")
-            print("  income_tax_act_sections.pdf")
+            if args.form_type == "itr2":
+                print("  itr2_instructions_AY2026-27.pdf")
+                print("  capital_gains_statement.pdf  (broker/RTA contract note summary)")
+                print("  home_loan_interest_certificate.pdf")
+                print("  income_tax_act_capital_gains_sections.pdf")
+            else:
+                print("  itr1_instructions_AY2024-25.pdf")
+                print("  circular_03_2025.pdf")
+                print("  income_tax_act_sections.pdf")
             return
 
         print(f"\nFound {len(pdfs)} PDF(s) in {pdf_dir}/\n")
         for pdf in pdfs:
             try:
-                chunks = ingest_pdf(pdf, args.ay)
+                chunks = ingest_pdf(pdf, ay, form_type=args.form_type, chunks_dir=chunks_dir)
                 all_chunks.extend(chunks)
             except Exception as e:
                 print(f"  ✗ Error: {e}")
 
     if all_chunks:
-        rebuild_combined()
+        rebuild_combined(chunks_dir, combined)
         print(f"\n✅ Done. Now run:")
-        print(f"   python embedder.py --backend huggingface --ay {args.ay}")
-        print(f"\nThis will embed ALL chunks (web + PDF) into FAISS/{args.ay}/")
+        print(f"   python embedder.py --backend huggingface --form-type {args.form_type} --ay {ay}")
+        print(f"\nThis will embed ALL chunks (web + PDF) into FAISS/{ay}/")
     else:
         print("\nNo chunks produced. Check PDF text extraction above.")
 
