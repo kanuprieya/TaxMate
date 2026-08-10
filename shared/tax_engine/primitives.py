@@ -205,17 +205,29 @@ def apply_cess(state: dict, params: dict) -> dict:
 #     within their own bucket and short-term loss offsets long-term gain, but
 #     inter-year carry-forward is only surfaced as a number, not tracked
 #     across filing years.
-#   - The indexation/rate transition introduced by the Finance Act 2024 is
-#     not modelled. Verified against current sources (Jul 2026): the flat
-#     12.5%-no-indexation rate this engine always applies to ltcg_112_other
-#     is correct as the general case, but resident individuals/HUFs holding
-#     LAND OR BUILDINGS ONLY acquired before 23-Jul-2024 may instead elect
-#     20%-with-indexation if it's lower — that election is not offered here,
-#     so such filers may see a higher computed LTCG tax than they're
-#     entitled to minimize. This grandfathering does NOT extend to unlisted
-#     shares, gold, bonds, or debt mutual funds, which get the flat 12.5%
-#     with no transition option regardless of acquisition date — configs
-#     pick the single correct-for-most-cases rate and apply it uniformly.
+#   - KNOWN SCOPE GAP (same treatment as foreign income above — flagged, not
+#     silently approximated): the indexation election introduced by the
+#     Finance Act 2024 is not modelled. Confirmed still live for AY 2026-27
+#     by CBDT's own AY2026-27 ITR-2 e-Filing Validation Rules PDF, not just a
+#     secondary source — specifically rules #569, #571, and #572 (Schedule
+#     CG section): the beneficial 20%-with-indexation rate on LTCG from land
+#     or building "is applicable only if the acquisition is before 23 July
+#     2024" (#569), a Schedule CG field is explicitly conditioned on
+#     "purchase was before 23rd July 2024" (#571), and residents get 20% via
+#     this election vs. the flat 12.5% otherwise (#572). This engine always
+#     applies the flat 12.5%-no-indexation rate to the entire ltcg_112_other
+#     bucket — correct for every acquisition-after-23-Jul-2024 case and for
+#     every non-land/building asset (unlisted shares, gold, bonds, debt MFs
+#     get flat 12.5% unconditionally, no election exists for them at all),
+#     but a resident individual/HUF who acquired land or a building before
+#     23-Jul-2024 may be entitled to the lower of the two rates, which this
+#     engine doesn't compute — such filers may see a higher LTCG tax here
+#     than they're legally entitled to minimize. Doing this correctly needs
+#     the indexed cost of acquisition (a CII-table lookup keyed to
+#     acquisition year) which compute_capital_gains doesn't currently
+#     collect or compute at all — same "flag rather than half-build it"
+#     call as foreign income, just narrower in scope since it only affects
+#     one bucket rather than blocking the whole filing.
 #   - Surcharge here reuses the plain apply_surcharge primitive; the special
 #     15% surcharge cap that applies specifically to capital-gains/dividend
 #     income regardless of the taxpayer's slab is not separately enforced.

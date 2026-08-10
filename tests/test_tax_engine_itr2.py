@@ -170,8 +170,10 @@ class TestCombinedScenario:
              12L-15,99,000(3,99,000)@15%=59,850 -> tax_before_rebate=1,19,850.
         Taxable income > 12L rebate threshold -> rebate=0 -> tax_after_rebate=1,19,850.
         + capital_gains_tax 34,375 -> 1,54,225. No surcharge (well below 50L).
-        Cess = 1,54,225*4% = 6,169 -> raw total = 1,60,394.
-        288B: last digit 4 -> rounds down -> total_tax = 1,60,390.
+        Cess = 1,54,225*4% = 6,169 -> total_tax = 1,60,394 — left as-is; 288B
+        rounds only the final post-TDS payable/refund amount, not this gross
+        figure (see tests/test_tax_engine.py::TestStatutoryRounding for the
+        real-filed-return evidence behind that fix).
         """
         result = compute(AY, "new", {
             "gross_salary": 1500000,
@@ -189,7 +191,7 @@ class TestCombinedScenario:
         assert result["capital_gains"] == {"stcg_111a": 0.0, "ltcg_112a": 400000.0, "ltcg_112_other": 0.0}
         assert result["capital_gains_tax"] == 34375.0
         assert result["taxable_income"] == 1599000
-        assert result["total_tax"] == 160390
+        assert result["total_tax"] == 160394
 
 
 class TestComputeTaxFromEngineItr2:

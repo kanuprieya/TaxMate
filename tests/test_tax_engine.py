@@ -81,12 +81,17 @@ class TestNewRegime:
 
 class TestStatutoryRounding:
 
-    def test_taxable_income_and_total_tax_round_to_nearest_10(self):
+    def test_taxable_income_rounds_but_gross_total_tax_does_not(self):
         """
-        Sections 288A/288B: taxable income rounds to the nearest ₹10 (applied
-        BEFORE slabs run), and the final tax payable rounds to the nearest
-        ₹10 (applied AFTER cess) — intermediate sub-heads (slab tax, rebate,
-        cess) are never individually rounded.
+        Section 288A rounds taxable income to the nearest ₹10 (applied
+        BEFORE slabs run). Section 288B rounds "any amount payable... or
+        any refund due" — the FINAL net figure after TDS, not the gross tax
+        liability itself. Confirmed by cross-checking a real filed ITR-2
+        return (AY2026-27, ack #718710960180726): its "Gross tax liability"
+        / "Aggregate liability" line (₹1,01,909) was an ordinary unrounded
+        rupee figure, not a multiple of ten — rounding total_tax itself
+        before computing refund/payable was a real bug (config previously
+        applied round_statutory to total_tax; removed).
 
         Gross salary 16,50,007; standard deduction 75,000
              -> raw taxable income = 15,75,007.
@@ -97,21 +102,21 @@ class TestStatutoryRounding:
              -> tax_before_rebate = 1,16,251.50.
         Taxable income (15,75,010) > rebate threshold (12L) -> rebate = 0.
         No surcharge. Cess = 1,16,251.50 * 4% = 4,650.06.
-        Raw total = 1,16,251.50 + 4,650.06 = 1,20,901.56.
-        288B: drop paise -> 1,20,901; last digit 1 -> rounds DOWN -> 1,20,900.
+        total_tax = 1,16,251.50 + 4,650.06 = 1,20,901.56 — left as-is, no
+        288B rounding applied here.
         """
         result = compute(AY, "new", {"gross_salary": 1650007})
         assert result["taxable_income"] == 1575010
-        assert result["total_tax"] == 120900
+        assert result["total_tax"] == 120901.56
 
-    def test_refund_or_payable_also_rounds_to_nearest_10(self):
+    def test_refund_or_payable_rounds_to_nearest_10_from_the_unrounded_total_tax(self):
         """
-        288B covers "any amount payable and any refund due" — the net figure
-        after TDS is rounded too, not just total_tax on its own.
+        288B applies exactly once, here — to the net amount after TDS, not
+        to total_tax on its own (see test above).
 
-        Reusing the scenario above (total_tax = 1,20,900 after rounding).
-        TDS = 1,25,003 -> raw refund = 1,25,003 - 1,20,900 = 4,103.
-        Last digit 3 -> rounds DOWN -> refund = 4,100.
+        Reusing the scenario above (total_tax = 1,20,901.56, unrounded).
+        TDS = 1,25,003 -> raw refund = 1,25,003 - 1,20,901.56 = 4,101.44.
+        288B: drop paise -> 4,101; last digit 1 -> rounds DOWN -> 4,100.
         """
         from shared.tax_utils import compute_tax_from_engine
 
@@ -125,7 +130,7 @@ class TestStatutoryRounding:
         }
         result = compute_tax_from_engine(extracted, ay=AY)
         comp = result["computed"]
-        assert comp["total_tax_liability"] == 120900
+        assert comp["total_tax_liability"] == 120901.56
         assert comp["refund_or_payable"] == 4100
 
 

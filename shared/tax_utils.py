@@ -158,8 +158,14 @@ def compute_tax_from_engine(extracted: dict, ay: str = "AY2026-27") -> dict:
 
     tds_deducted = float_safe(extracted.get("tds", 0.0))
     total_tax = state.get("total_tax", 0.0)
-    # Section 288B covers "any amount payable and any refund due" — the net
-    # figure after TDS is itself rounded to the nearest ₹10, same as total_tax.
+    # Section 288B covers "any amount payable and any refund due" — that's
+    # this net post-TDS figure, not the gross total_tax liability itself
+    # (confirmed against a real filed ITR-2 return: gross liability stayed
+    # an unrounded rupee figure; only a genuinely final payable/refund
+    # amount would ever be a multiple of 10). Rounding total_tax itself
+    # before this subtraction double-applies 288B and was a real, shipped
+    # bug — configs no longer place round_statutory on total_tax; this is
+    # the only place 288B rounding happens now.
     refund_or_payable = round_to_nearest_10(tds_deducted - total_tax)  # positive = refund, negative = payable
 
     comp = {

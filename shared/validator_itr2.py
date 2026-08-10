@@ -72,6 +72,24 @@ class ITR2Validator:
             if float(cg.get(bucket, 0)) < 0:
                 result.errors.append(f"Capital gains bucket '{bucket}' computed negative — set-off logic failed")
 
+        # Known scope gap (see shared/tax_engine/primitives.py's
+        # apply_special_rate_capital_gains_tax docstring for the CBDT
+        # AY2026-27 validation-rule citations backing this): the
+        # pre-23-Jul-2024 land/building indexation election isn't modelled —
+        # this bucket is always taxed at the flat 12.5% rate, which may be
+        # higher than the taxpayer is legally entitled to pay if part of it
+        # is land/building acquired before that date. Surfaced as a warning
+        # rather than blocking the filing (unlike foreign income) because
+        # the flat rate is still a lawful result for most filers in this
+        # bucket, not a computation this tool cannot do at all.
+        if float(cg.get("ltcg_112_other", 0)) > 0:
+            result.warnings.append(
+                "Long-term capital gains on non-equity assets were taxed at a flat 12.5% "
+                "without checking for the pre-23-Jul-2024 land/building indexation election. "
+                "If any of this gain is from land or a building acquired before 23-Jul-2024, "
+                "verify with a tax professional whether 20%-with-indexation would be lower."
+            )
+
         # ---- 6. Computation consistency ----
         gross_total_income = float(computed.get("gross_total_income", 0))
         total_income = float(computed.get("taxable_income", 0))
