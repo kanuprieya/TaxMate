@@ -210,6 +210,25 @@ def parse_form16_text(full_text: str) -> Form16Data:
             print(f"[FORM16-DEBUG]   {field}: NO MATCH — tried {len(patterns)} pattern(s)", flush=True)
     return result
 
+def parse_form16_from_text(full_text: str) -> Form16Data:
+    """Entry point for any source that already has plain text — used by
+    parse_form16() below (pdfplumber output) and, from doc-parser/main.py,
+    for .xlsx uploads (flattened sheet text). Extraction itself was already
+    text-only (both extract_form16_llm and parse_form16_text take a string,
+    never the file), so no format-specific logic lives here."""
+    print(f"[FORM16-DEBUG] TOTAL extracted text length: {len(full_text)} chars", flush=True)
+    if len(full_text.strip()) == 0:
+        print("[FORM16-DEBUG] WARNING: extracted ZERO text — likely a scanned/image-based "
+              "PDF or a text layer pdfplumber can't read. Extraction cannot work on empty text.", flush=True)
+        return parse_form16_text(full_text)
+
+    try:
+        return extract_form16_llm(full_text)
+    except Exception as e:
+        print(f"[FORM16-DEBUG] LLM extraction failed ({e!r}) — falling back to regex extraction", flush=True)
+        return parse_form16_text(full_text)
+
+
 def parse_form16(path: str) -> Form16Data:
     import pdfplumber
     full_text = ""
@@ -221,17 +240,7 @@ def parse_form16(path: str) -> Form16Data:
             print(page_text, flush=True)
             print(f"[FORM16-DEBUG] --- end page {i+1} ---", flush=True)
             full_text += page_text + "\n"
-    print(f"[FORM16-DEBUG] TOTAL extracted text length: {len(full_text)} chars", flush=True)
-    if len(full_text.strip()) == 0:
-        print("[FORM16-DEBUG] WARNING: pdfplumber extracted ZERO text — likely a scanned/image-based "
-              "PDF or a text layer pdfplumber can't read. Extraction cannot work on empty text.", flush=True)
-        return parse_form16_text(full_text)
-
-    try:
-        return extract_form16_llm(full_text)
-    except Exception as e:
-        print(f"[FORM16-DEBUG] LLM extraction failed ({e!r}) — falling back to regex extraction", flush=True)
-        return parse_form16_text(full_text)
+    return parse_form16_from_text(full_text)
 
 def _n(v: Optional[float]) -> float:
     """Null-safe numeric coercion for arithmetic only — never use this to
@@ -284,6 +293,18 @@ def form16_to_dict(data: Form16Data) -> dict:
         if getattr(data, attr) is None
     ]
 
+    # doc-parser/main.py used to default every Form16 upload to a flat 0.5
+    # confidence regardless of match quality (form16_to_dict never actually
+    # set the key it reads) — a "Salary workings" spreadsheet with nothing
+    # recognizable on it showed the exact same 50% as a fully-matched real
+    # Form 16. If the two identity-anchoring fields (name, gross salary) are
+    # both missing, this almost certainly isn't a Form 16 at all; otherwise
+    # scale down from the missing-field count.
+    if data.employee_name is None and gross_salary_total is None:
+        parse_confidence = 0.1
+    else:
+        parse_confidence = max(0.15, 1.0 - (len(missing_fields) / 6) * 0.7)
+
     mapped = {
         "employee_name": data.employee_name,
         "employee_pan": data.employee_pan,
@@ -317,6 +338,7 @@ def form16_to_dict(data: Form16Data) -> dict:
         # "form16"), so the UI can show "₹0" for a confirmed zero and "—"
         # only for a field that was genuinely never found.
         "extraction_meta": {"missing_fields": missing_fields},
+        "parse_confidence": parse_confidence,
     }
     print(f"[FORM16-DEBUG] Final form16_to_dict() output:\n{json.dumps(mapped, indent=2, default=str)}", flush=True)
     return mapped

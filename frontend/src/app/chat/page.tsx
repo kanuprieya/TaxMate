@@ -154,7 +154,7 @@ function RegimeCard({ sessionId }: { sessionId: string }) {
     fetch(`${API}/api/pipeline/${sessionId}`)
       .then(r => r.json())
       .then(d => {
-        const form = d?.itr1_form;
+        const form = d?.form_type === "itr1" ? d?.itr1_form : d?.itr2_form;
         if (!form) return;
         setRegime({
           recommended: form.regime_recommendation || "new",
@@ -212,8 +212,22 @@ function ChatPageInner() {
   ]);
   const [input,   setInput]   = useState("");
   const [loading, setLoading] = useState(false);
+  const [ay,      setAy]      = useState("AY2026-27");
   const bottomRef             = useRef<HTMLDivElement>(null);
   const inputRef              = useRef<HTMLTextAreaElement>(null);
+
+  // ITR-2 sessions must query the AY2026-27_ITR2 KB namespace (Schedule
+  // HP/CG content), not the ITR-1 one — RegimeCard below does its own
+  // separate fetch of the same session for the same reason, but doesn't
+  // expose form_type to this component, so this is a second small fetch
+  // rather than a restructure of that self-contained component.
+  useEffect(() => {
+    if (!sessionId) return;
+    fetch(`${API}/api/pipeline/${sessionId}`)
+      .then(r => r.json())
+      .then(d => { if (d?.form_type === "itr2") setAy("AY2026-27_ITR2"); })
+      .catch(() => {});
+  }, [sessionId]);
 
   // Auto-scroll
   useEffect(() => {
@@ -253,11 +267,15 @@ function ChatPageInner() {
         body:    JSON.stringify({
           question,
           session_id:           sessionId || undefined,
-          ay:                   "AY2026-27",
+          ay,
           include_form_context: !!sessionId,
         }),
       });
       const data = await resp.json();
+
+      if (!resp.ok || data.success === false) {
+        throw new Error(data.detail || data.error || "Query failed");
+      }
 
       const aiMsg: Message = {
         id:        Date.now().toString() + "_ai",
@@ -279,7 +297,7 @@ function ChatPageInner() {
       setLoading(false);
       inputRef.current?.focus();
     }
-  }, [loading, sessionId]);
+  }, [loading, sessionId, ay]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {

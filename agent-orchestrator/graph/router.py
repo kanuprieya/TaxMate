@@ -2,11 +2,10 @@
 ITR-1 / ITR-2 Eligibility Router
 ====================================
 The ONLY place in this codebase that decides (a) whether a filing is out of
-scope entirely (currently: foreign income/assets — Schedule FA/FSI) and, if
+scope entirely (currently: Non-Resident/RNOR residential status) and, if
 not, (b) which of the two form pipelines (graph.itr_graph vs graph.itr2_graph)
-it goes through. Neither graph imports or branches on the other, and neither
-has any foreign-income handling — main.py calls exactly this module to find
-out what to do.
+it goes through. Neither graph imports or branches on the other — main.py
+calls exactly this module to find out what to do.
 
 Eligibility here approximates the real ITR-1 (Sahaj) eligibility rules for
 AY 2026-27 specifically, based purely on which document types were uploaded
@@ -22,9 +21,13 @@ this check:
     that — any Sec 111A STCG, any non-equity gain, or 112A LTCG above the
     threshold — require ITR-2. A filer with a small 112A gain and nothing
     else should not be bounced to ITR-2 unnecessarily.
-  - Any foreign income/assets -> out of scope entirely, not just "needs
-    ITR-2" (see is_out_of_scope below — this is a deliberate scope decision,
-    not something either graph attempts and gets wrong).
+  - ANY foreign income or foreign asset disclosure forces ITR-2 regardless
+    of every other threshold — this is a real CBDT eligibility rule (ITR-1
+    is legally unavailable to a filer with foreign income/assets), not just
+    an app-scope choice. Resident filers' foreign income is now computed
+    (Schedule FSI, via shared.tax_engine.primitives.aggregate_foreign_income/
+    apply_foreign_tax_credit) rather than flagged out of scope — see
+    is_out_of_scope below for what's still actually out of scope.
   - Total income > Rs 50 lakh -> not eligible for ITR-1 (estimated here from
     raw extracted figures since the authoritative computation only happens
     inside whichever graph gets chosen — see _estimate_total_income).
@@ -47,32 +50,52 @@ MAX_ITR1_TOTAL_INCOME = 5000000
 LTCG_112A_EXEMPTION = 125000
 
 
+def _has_foreign_docs(parsed_documents: list[dict]) -> bool:
+    """True if any document carries real foreign income/asset content —
+    either an explicit foreign_income upload, or any other document
+    doc-parser/main.py reclassified after detecting a foreign-currency
+    signal (e.g. a "Salary workings...AED" spreadsheet uploaded to the
+    Form 16 slot ends up doc_type="foreign_income" with real entries, not
+    just a flag)."""
+    for d in parsed_documents:
+        if d.get("doc_type") != FOREIGN_INCOME_DOC_TYPE:
+            continue
+        data = d.get("data", {})
+        if data.get("foreign_income") or data.get("foreign_assets"):
+            return True
+    return False
+
+
 def is_out_of_scope(parsed_documents: list[dict]) -> Optional[str]:
-    """Returns a user-facing redirect message if this filing has income this
-    codebase deliberately doesn't compute (currently: any foreign income or
-    asset disclosure — Schedule FA/FSI), or None if it's in scope for one of
-    the two graphs. Checked before determine_form_type so an out-of-scope
-    filing never enters either pipeline half-computed — full DTAA/Schedule FA
-    computation was cut after scoping it out as more than this pass has time
-    to get right, so this stays a flag-and-redirect, not an attempt."""
-    foreign_docs = [d for d in parsed_documents if d.get("doc_type") == FOREIGN_INCOME_DOC_TYPE]
-    if not foreign_docs:
-        return None
+    """Returns a user-facing redirect message if this filing has a
+    residency status this codebase deliberately doesn't compute, or None if
+    it's in scope for one of the two graphs. Checked before
+    determine_form_type so an out-of-scope filing never enters either
+    pipeline half-computed.
 
-    countries = sorted({
-        entry.get("country")
-        for d in foreign_docs
-        for entry in (d.get("data", {}).get("foreign_income", []) + d.get("data", {}).get("foreign_assets", []))
-        if entry.get("country")
-    })
-    where = f" ({', '.join(countries)})" if countries else ""
+    Non-Resident/RNOR filers are taxed on a different, source-based/DTAA-
+    affected basis this codebase doesn't model AT THE WHOLE-RETURN LEVEL —
+    unlike foreign income for a Resident (which Schedule FSI now computes),
+    an NR/RNOR's residential status changes how EVERY income head is
+    sourced and taxed, not just the foreign-currency line items, so this
+    stays flag-and-redirect rather than an attempt.
+    """
+    non_resident_docs = [
+        d for d in parsed_documents
+        if d.get("doc_type") == "residential_status" and d.get("data", {}).get("status") in ("non_resident", "rnor")
+    ]
 
-    return (
-        f"Foreign income and/or foreign asset disclosure (Schedule FSI/FA){where} "
-        "was detected in your documents. This is out of scope for automated "
-        "computation in this tool — please consult a tax professional for "
-        "this filing rather than relying on this result."
-    )
+    if non_resident_docs:
+        status = non_resident_docs[0]["data"]["status"]
+        label = "Non-Resident" if status == "non_resident" else "Resident but Not Ordinarily Resident (RNOR)"
+        return (
+            f"Your uploaded residential status document indicates {label} status. This tool "
+            "only computes returns for Residents (Ordinarily Resident) — NR/RNOR taxation "
+            "involves source-based rules and DTAA provisions this tool doesn't model. Please "
+            "consult a tax professional for this filing rather than relying on this result."
+        )
+
+    return None
 
 
 def _merged_capital_gains_buckets(parsed_documents: list[dict]) -> dict:
@@ -116,8 +139,11 @@ def _estimate_total_income(parsed_documents: list[dict], capital_gains_buckets: 
 def determine_form_type(parsed_documents: list[dict]) -> str:
     """Returns 'itr1' or 'itr2' based on the uploaded document set.
     Precondition: is_out_of_scope(parsed_documents) is None — this function
-    doesn't itself check for foreign income, since run_pipeline() below
-    always checks that first and short-circuits before this is ever called."""
+    doesn't check residential status, since run_pipeline() below always
+    checks that first and short-circuits before this is ever called."""
+    if _has_foreign_docs(parsed_documents):
+        return "itr2"
+
     total_properties = sum(
         len(d.get("data", {}).get("house_properties", []))
         for d in parsed_documents

@@ -193,11 +193,14 @@ def apply_cess(state: dict, params: dict) -> dict:
 # ITR-2 configs are simply free to place these alongside the original 8 in
 # their own `steps` list.
 #
-# Foreign income/assets (Schedule FA/FSI, DTAA relief) are explicitly OUT OF
-# SCOPE — deliberately not a primitive here. graph/router.py detects and
-# flags those filings for a tax professional before either graph runs, rather
-# than attempting a computation that would need far more care to get right
-# than this scaffold has budget for.
+# Foreign income (Schedule FSI) is computed by the two primitives below —
+# aggregate_foreign_income and apply_foreign_tax_credit — for RESIDENT
+# filers only; graph/router.py still flags and redirects Non-Resident/RNOR
+# filings before either graph runs (their whole return uses different
+# source-based rules this engine doesn't model at all, not just the foreign
+# income line items). Foreign ASSET disclosure (Schedule FA) is carried
+# through for display but never affects the tax computation itself — asset
+# holding alone isn't income.
 #
 # Known simplifications (first-cut scaffold, not a certified compliance
 # engine — flagged here rather than left implicit):
@@ -355,6 +358,84 @@ def compute_capital_gains(state: dict, params: dict) -> dict:
     }
     state["capital_gains_breakdown"] = breakdown
     state["other_source_income"] = state.get("other_source_income", 0.0) + stcg_slab
+    return state
+
+
+def aggregate_foreign_income(state: dict, params: dict) -> dict:
+    """Schedule FSI — folds foreign-source income into the ordinary domestic
+    income heads BEFORE aggregate_gross_income runs, since a Resident and
+    Ordinarily Resident filer's foreign income is taxed at the exact same
+    slab rates as domestic income (no special rate exists for it, unlike
+    capital gains). Also totals the foreign income and foreign tax paid for
+    apply_foreign_tax_credit, which must run near the very end once
+    total_tax is final.
+
+    state['foreign_income_raw']: list of
+        {income_type: "salary" | "other", foreign_income_amount_inr, foreign_tax_paid_inr}
+    Amounts are expected already converted to INR by the document/parser
+    (Rule 115 SBI-TT-rate conversion) — this primitive does no currency
+    conversion of its own, it only aggregates.
+
+    "salary"-type income adds to gross_salary (so it still gets the one
+    standard deduction like any other salary — a second standard deduction
+    per source isn't a real thing). Every other income_type (interest,
+    dividend, rental, etc.) adds to other_source_income instead, matching
+    how compute_capital_gains already folds its own slab-taxed bucket into
+    the same field.
+    """
+    state = dict(state)
+    foreign_salary = 0.0
+    foreign_other = 0.0
+    foreign_tax_paid_total = 0.0
+
+    for entry in state.get("foreign_income_raw", []):
+        amount = entry.get("foreign_income_amount_inr", 0.0)
+        if entry.get("income_type") == "salary":
+            foreign_salary += amount
+        else:
+            foreign_other += amount
+        foreign_tax_paid_total += entry.get("foreign_tax_paid_inr", 0.0)
+
+    state["gross_salary"] = state.get("gross_salary", 0.0) + foreign_salary
+    state["other_source_income"] = state.get("other_source_income", 0.0) + foreign_other
+    state["foreign_income_total_inr"] = round(foreign_salary + foreign_other, 2)
+    state["foreign_tax_paid_total"] = round(foreign_tax_paid_total, 2)
+    return state
+
+
+def apply_foreign_tax_credit(state: dict, params: dict) -> dict:
+    """Sec 90/90A/91 DTAA relief, computed the way Rule 128(1) defines it:
+    the credit for a given chunk of foreign income is the LOWER of (a) the
+    foreign tax actually paid on it and (b) the Indian tax attributable to
+    it. This engine doesn't track separate per-country/per-income-head tax
+    rates, so (b) is approximated with one blended average rate — total_tax
+    divided by taxable_income — applied to the total foreign income, rather
+    than Form 67's full per-country/per-head breakdown. That's a real
+    simplification (a filer with foreign income taxed at a very different
+    marginal slice than their average rate would get a slightly different
+    number from the official Form 67 calculation), not the complete Rule
+    128 mechanism — flagged here the same way the LTCG indexation-election
+    gap is flagged above, rather than silently approximated.
+
+    Must run AFTER apply_cess: it needs total_tax to be final, since the
+    credit reduces the government's actual tax bill, not an intermediate
+    sub-total.
+    """
+    state = dict(state)
+    foreign_income = state.get("foreign_income_total_inr", 0.0)
+    foreign_tax_paid = state.get("foreign_tax_paid_total", 0.0)
+    taxable_income = state.get("taxable_income", 0.0)
+    total_tax = state.get("total_tax", 0.0)
+
+    if foreign_income > 0 and foreign_tax_paid > 0 and taxable_income > 0:
+        average_rate = total_tax / taxable_income
+        indian_tax_on_foreign_income = average_rate * foreign_income
+        credit = min(foreign_tax_paid, indian_tax_on_foreign_income)
+    else:
+        credit = 0.0
+
+    state["foreign_tax_credit"] = round(credit, 2)
+    state["total_tax"] = round(total_tax - credit, 2)
     return state
 
 

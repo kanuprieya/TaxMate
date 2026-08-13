@@ -50,7 +50,15 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
   fileFilter: (req, file, cb) => {
-    const allowed = ["application/pdf", "image/jpeg", "image/png"];
+    const allowed = [
+      "application/pdf", "image/jpeg", "image/png",
+      // .xlsx / .xlsm — some browsers/OSes send the generic octet-stream
+      // type instead of the spreadsheet-specific one; doc-parser itself
+      // does the stricter extension+mimetype check on top of this.
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-excel.sheet.macroEnabled.12",
+      "application/octet-stream",
+    ];
     cb(null, allowed.includes(file.mimetype));
   },
 });
@@ -116,11 +124,26 @@ app.post(
       if (session_id) form.append("session_id", session_id);
       if (hint)       form.append("hint", hint);
 
-      const endpoint = docType === "auto"
+      // .xlsx/.xlsm uploads always go through /parse/auto regardless of
+      // docType — the legacy /parse/form16 and /parse/bank-statement
+      // endpoints call doc-parser's unified handler with hint hardcoded to
+      // null, so an Excel file that doc-type detection doesn't recognize on
+      // content alone would have no way to fall back to the right parser.
+      // PDF/JPG/PNG uploads are untouched: same legacy-endpoint routing as
+      // always.
+      const isExcel = /\.xls[mx]$/i.test(req.file.originalname || "")
+        || req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        || req.file.mimetype === "application/vnd.ms-excel.sheet.macroEnabled.12";
+
+      const endpoint = (docType === "auto" || isExcel)
         ? "/parse/auto"
         : docType === "form16"
           ? "/parse/form16"
-          : "/parse/bank-statement";
+          : docType === "bank_statement"
+            ? "/parse/bank-statement"
+            // ITR-2 doc types (capital_gains, property, foreign_income) have no
+            // legacy endpoint — route through unified detection+hint instead.
+            : "/parse/auto";
 
       const resp = await fetch(`${SERVICES.docParser}${endpoint}`, {
         method: "POST",

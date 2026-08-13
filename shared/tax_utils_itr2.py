@@ -3,10 +3,13 @@ ITR-2 tax computation glue
 =============================
 Mirrors shared/tax_utils.py::compute_tax_from_engine, but drives the
 *_ITR2_*.json configs and feeds the ITR-2-only primitives (house properties,
-capital gains) in addition to the same salary/other-income mapping ITR-1
-uses. Foreign income/assets are explicitly out of scope — graph/router.py's
-is_out_of_scope() flags and redirects those filings before this function is
-ever called, so it has no foreign-income handling to carry.
+capital gains, foreign income) in addition to the same salary/other-income
+mapping ITR-1 uses. Non-Resident/RNOR filings are still out of scope —
+graph/router.py's is_out_of_scope() flags and redirects those before this
+function is ever called — but Resident filers' foreign income now flows
+through here like any other income source, computed by
+shared.tax_engine.primitives's aggregate_foreign_income/
+apply_foreign_tax_credit.
 
 Reuses shared.tax_utils's private Form16-shape mapper and float_safe by
 import (read-only) rather than duplicating it — shared/tax_utils.py itself
@@ -47,6 +50,7 @@ def compute_tax_from_engine_itr2(extracted: dict, ay: str = "AY2026-27") -> dict
     inputs = _extracted_to_engine_inputs(extracted)
     inputs["house_properties"] = extracted.get("house_properties", [])
     inputs["capital_gains_raw"] = extracted.get("capital_gains_raw", [])
+    inputs["foreign_income_raw"] = extracted.get("foreign_income_raw", [])
 
     try:
         state = _engine_compute(_itr2_config_ay(ay), regime, inputs)
@@ -72,7 +76,12 @@ def compute_tax_from_engine_itr2(extracted: dict, ay: str = "AY2026-27") -> dict
     refund_or_payable = round_to_nearest_10(tds_deducted - total_tax)
 
     comp = {
-        "gross_salary":        inputs["gross_salary"],
+        # state["gross_salary"], not inputs["gross_salary"]: aggregate_foreign_income
+        # adds any foreign salary into the engine's own copy of gross_salary before
+        # the standard deduction is applied — reading the pre-merge inputs dict here
+        # would show a domestic-only figure that doesn't reconcile with net_salary
+        # (which correctly reflects the merged total) for a filer with foreign salary.
+        "gross_salary":        state.get("gross_salary", inputs["gross_salary"]),
         "salary_income":       state.get("net_salary", 0.0),
         "hra_exemption":       float_safe(extracted.get("hra_exempt", 0.0)),
         "total_exemptions":    inputs["exempt_allowances"],
@@ -83,6 +92,9 @@ def compute_tax_from_engine_itr2(extracted: dict, ay: str = "AY2026-27") -> dict
         "house_property_loss_carried_forward": state.get("house_property_loss_carried_forward", 0.0),
         "capital_gains":       state.get("capital_gains", {}),
         "capital_gains_tax":   state.get("capital_gains_tax", 0.0),
+        "foreign_income_total_inr": state.get("foreign_income_total_inr", 0.0),
+        "foreign_tax_paid_total":   state.get("foreign_tax_paid_total", 0.0),
+        "foreign_tax_credit":       state.get("foreign_tax_credit", 0.0),
         "gross_total_income":  state.get("gross_total_income", 0.0),
         "taxable_income":      state.get("taxable_income", 0.0),
         "tax_before_rebate":   state.get("tax_before_rebate", 0.0),

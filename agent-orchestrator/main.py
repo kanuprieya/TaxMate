@@ -250,7 +250,9 @@ async def chat_query(req: ChatRequest):
     question = req.question
     form_ctx  = ""
     if req.include_form_context and req.session_id and req.session_id in _session_store:
-        form = _session_store[req.session_id]["itr1_form"]
+        result   = _session_store[req.session_id]
+        form_key = "itr1_form" if result.get("_form_type", "itr1") == "itr1" else "itr2_form"
+        form     = result.get(form_key, {})
         tc   = form.get("tax_computation", {})
         form_ctx = (
             f"\n\nUser's profile: GTI=₹{tc.get('gross_total_income', 0):,.0f}, "

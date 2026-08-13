@@ -1,11 +1,12 @@
 """
 ITR-2 Form Schema — AY 2026-27
 =================================
-Pydantic models for the ITR-2-only sections: multiple house properties and
-Schedule CG (capital gains). Schedule FA/FSI (foreign assets & income) is
-explicitly out of scope — graph/router.py's is_out_of_scope() flags and
-redirects those filings before an ITR2Form is ever built, so there's no
-foreign-income schema here to leave unused.
+Pydantic models for the ITR-2-only sections: multiple house properties,
+Schedule CG (capital gains), and Schedule FSI/FA (foreign income/assets —
+computed for Resident filers via shared.tax_engine.primitives.
+aggregate_foreign_income/apply_foreign_tax_credit; Non-Resident/RNOR
+filings are still flagged out of scope by graph/router.py's
+is_out_of_scope() before an ITR2Form is ever built).
 
 Everything reusable from ITR-1 (personal info, salary, deductions, TDS, tax
 computation, confidence/validation shapes) is imported directly from
@@ -38,7 +39,8 @@ __all__ = [
     "TaxRegime", "FilingStatus", "ResidentialStatus", "PersonalInfo",
     "SalaryIncome", "OtherSourcesIncome", "Deductions", "TDSEntry",
     "TaxComputation", "FieldConfidence", "ValidationFlag",
-    "HousePropertyEntry", "CapitalGainsEntry", "ITR2Form",
+    "HousePropertyEntry", "CapitalGainsEntry",
+    "ForeignIncomeEntry", "ForeignAssetEntry", "ITR2Form",
 ]
 
 # ── Section: Schedule HP (multiple house properties) ─────────────────────────
@@ -93,12 +95,39 @@ class CapitalGainsSummary(BaseModel):
     capital_gains_tax: float = 0.0
 
 
+# ── Section: Schedule FSI / FA (foreign income / foreign assets) ─────────────
+
+class ForeignIncomeEntry(BaseModel):
+    """One foreign-income entry in Schedule FSI. income_type only
+    distinguishes "salary" (folds into salary income, one shared standard
+    deduction) from "other" (interest/dividend/rental/etc, folds into other
+    sources) — this engine doesn't compute per-country/per-head DTAA
+    credits separately, see apply_foreign_tax_credit's docstring for the
+    blended-average-rate approximation this uses instead."""
+
+    country:                   Optional[str] = None
+    income_type:                str = "other"   # "salary" | "other"
+    foreign_income_amount_inr:  float = 0.0
+    foreign_tax_paid_inr:       float = 0.0
+
+
+class ForeignAssetEntry(BaseModel):
+    """One foreign asset disclosure in Schedule FA. Disclosure only — never
+    affects the tax computation itself, only appears here for the filer's
+    own record/reference."""
+
+    country:            Optional[str] = None
+    asset_type:          str = "bank_account"   # "bank_account" | "equity" | "property" | "other"
+    peak_value_inr:       float = 0.0
+    closing_value_inr:    float = 0.0
+
+
 # ── Master ITR-2 Form ─────────────────────────────────────────────────────────
 
 class ITR2Form(BaseModel):
-    """Complete ITR-2 form (excluding Schedule FA/FSI — out of scope; see
-    module docstring). Structurally the same shape as ITR1Form for the
-    sections they share, plus Schedule HP as a list and Schedule CG."""
+    """Complete ITR-2 form. Structurally the same shape as ITR1Form for the
+    sections they share, plus Schedule HP as a list, Schedule CG, and
+    Schedule FSI/FA."""
 
     personal_info:        PersonalInfo               = Field(default_factory=PersonalInfo)
     salary_income:        SalaryIncome               = Field(default_factory=SalaryIncome)
@@ -106,6 +135,17 @@ class ITR2Form(BaseModel):
     house_property_loss_carried_forward: float       = 0.0
     capital_gains:        list[CapitalGainsEntry]    = Field(default_factory=list)
     capital_gains_summary: CapitalGainsSummary        = Field(default_factory=CapitalGainsSummary)
+    foreign_income:        list[ForeignIncomeEntry]   = Field(default_factory=list)
+    foreign_assets:         list[ForeignAssetEntry]    = Field(default_factory=list)
+    foreign_tax_credit:     float                      = 0.0
+    # True only if a residential_status document was uploaded and confirmed
+    # "resident" (NR/RNOR never reach this graph — graph/router.py redirects
+    # those before ITR2Form is ever built). False means residency was never
+    # actually checked and personal_info.residential_status is still just
+    # the schema default — this computation is only valid for a Resident
+    # and Ordinarily Resident filer, so an unconfirmed status with real
+    # foreign income present is a load-bearing assumption, not a formality.
+    residential_status_confirmed: bool = False
     other_sources:        OtherSourcesIncome         = Field(default_factory=OtherSourcesIncome)
     deductions:            Deductions                 = Field(default_factory=Deductions)
     tds_details:           list[TDSEntry]             = Field(default_factory=list)

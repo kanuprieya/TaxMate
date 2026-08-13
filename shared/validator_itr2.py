@@ -2,12 +2,16 @@
 ITR-2 validation
 ===================
 Mirrors shared/validator.py's TaxValidator, but for ITR-2's broader income
-shape (multiple house properties, capital gains) instead of salary-only.
-Foreign income is out of scope (see graph/router.py's is_out_of_scope()) and
-never reaches this validator. Reuses the ValidationResult/TaxConfig shapes
-from shared/validator.py by import (read-only) so both validators plug into
-their respective graphs the same way — shared/validator.py itself is not
-modified.
+shape (multiple house properties, capital gains, foreign income) instead of
+salary-only. Non-Resident/RNOR filings are still out of scope (see
+graph/router.py's is_out_of_scope()) and never reach this validator, but a
+Resident's foreign income does — the residential-status-confirmation and
+Schedule FA disclosure warnings for that case live in
+graph/itr2_graph.py's node_fill_form rather than here, alongside the other
+document-presence checks (e.g. "no Form 16 uploaded") that already lived
+there. Reuses the ValidationResult/TaxConfig shapes from shared/validator.py
+by import (read-only) so both validators plug into their respective graphs
+the same way — shared/validator.py itself is not modified.
 """
 
 from typing import Dict, Any

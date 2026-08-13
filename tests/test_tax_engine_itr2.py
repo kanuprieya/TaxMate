@@ -194,6 +194,81 @@ class TestCombinedScenario:
         assert result["total_tax"] == 160394
 
 
+class TestForeignIncome:
+
+    def test_foreign_salary_with_tax_credit(self):
+        """Resident filer, domestic salary 10,00,000 + foreign salary
+        5,00,000 (already INR-converted) with Rs 50,000 foreign tax paid.
+
+        aggregate_foreign_income folds foreign salary into gross_salary
+        BEFORE the standard deduction, same as domestic salary:
+        gross_salary = 10,00,000 + 5,00,000 = 15,00,000.
+        Standard deduction 75,000 -> net_salary = taxable_income = 14,25,000
+        (already a multiple of 10, 288A rounding is a no-op).
+
+        Slabs on 14,25,000: 0-4L@0=0, 4-8L@5%=20,000, 8-12L@10%=40,000,
+             12L-14,25,000(2,25,000)@15%=33,750 -> tax_before_rebate=93,750.
+        Taxable income > 12L rebate threshold -> rebate=0.
+        No surcharge, no capital gains. Cess = 93,750*4%=3,750.
+        total_tax before FTC = 93,750+3,750 = 97,500.
+
+        Sec 90/91 credit (Rule 128 lower-of, approximated with one blended
+        average rate since this engine doesn't track per-country/per-head
+        rates): average_rate = 97,500/14,25,000 = 6.842105...%.
+        Indian tax attributable to the foreign 5,00,000 = 34,210.526...
+        Credit = min(50,000 foreign tax paid, 34,210.526...) = 34,210.53
+        (the credit is capped by the LOWER figure — India only relieves
+        double taxation up to what it would itself have charged, it
+        doesn't refund foreign tax in excess of that).
+        total_tax after FTC = 97,500 - 34,210.526... = 63,289.47.
+        """
+        result = compute(AY, "new", {
+            "gross_salary": 1000000,
+            "house_properties": [],
+            "capital_gains_raw": [],
+            "foreign_income_raw": [
+                {"income_type": "salary", "foreign_income_amount_inr": 500000, "foreign_tax_paid_inr": 50000},
+            ],
+        })
+        assert result["gross_salary"] == 1500000
+        assert result["taxable_income"] == 1425000
+        assert result["foreign_income_total_inr"] == 500000.0
+        assert result["foreign_tax_paid_total"] == 50000.0
+        assert result["foreign_tax_credit"] == 34210.53
+        assert result["total_tax"] == 63289.47
+
+    def test_foreign_income_with_no_foreign_tax_paid_gets_zero_credit(self):
+        """Common real case (e.g. UAE has no personal income tax): foreign
+        income still gets added to taxable income and taxed at India's slab
+        rates like any other income, but there's nothing to credit since no
+        foreign tax was actually paid on it."""
+        result = compute(AY, "new", {
+            "gross_salary": 1000000,
+            "house_properties": [],
+            "capital_gains_raw": [],
+            "foreign_income_raw": [
+                {"income_type": "salary", "foreign_income_amount_inr": 500000, "foreign_tax_paid_inr": 0},
+            ],
+        })
+        assert result["taxable_income"] == 1425000
+        assert result["foreign_tax_credit"] == 0.0
+        assert result["total_tax"] == 97500.0
+
+    def test_no_foreign_income_is_a_no_op(self):
+        """A filer with zero foreign_income_raw entries must see byte-
+        identical behavior to before these primitives existed — guards
+        against the additive change silently altering domestic-only
+        filings."""
+        result = compute(AY, "new", {
+            "gross_salary": 1000000,
+            "house_properties": [],
+            "capital_gains_raw": [],
+        })
+        assert result["gross_salary"] == 1000000
+        assert result["foreign_tax_credit"] == 0.0
+        assert result["total_tax"] == result["tax_after_rebate"] + result["health_education_cess"]
+
+
 class TestComputeTaxFromEngineItr2:
 
     def test_form16_shape_mapping_and_refund_matches_direct_engine_call(self):

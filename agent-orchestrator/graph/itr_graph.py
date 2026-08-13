@@ -161,6 +161,42 @@ def node_fill_form(state: AgentState) -> dict:
     extracted = form16_doc.get("data", {})
     if not extracted:
         return {**state, "error": "Invalid Form 16 data structure.", "step": "fill_form"}
+    extracted = dict(extracted)  # local copy — see additive merge below, which must not mutate raw_documents in place
+
+    # "Other Inputs, Deductions & Disclosures" documents (health/life
+    # insurance premium, home loan principal, dividend/domestic-interest
+    # summaries) — additive only: a filer with none of these doc types sees
+    # byte-identical behavior to before this block existed. Mirrors the same
+    # merge in graph/itr2_graph.py's node_fill_form (duplicated rather than
+    # shared, since the two graphs are deliberately independent — see this
+    # file's module docstring); added here because ITR-2-eligible-looking
+    # filers can still land on this ITR-1 graph (no capital gains, <=2
+    # properties), and their uploaded deduction documents were previously
+    # silently dropped rather than merged.
+    extra_80d = sum(
+        float_safe(d.get("data", {}).get("premium_paid", 0.0))
+        for d in docs if d.get("doc_type") == "health_insurance"
+    )
+    extra_80c = (
+        sum(float_safe(d.get("data", {}).get("premium_paid", 0.0)) for d in docs if d.get("doc_type") == "life_insurance")
+        + sum(float_safe(d.get("data", {}).get("principal_repaid", 0.0)) for d in docs if d.get("doc_type") == "home_loan")
+    )
+    extra_other_sources = sum(
+        float_safe(d.get("data", {}).get(field, 0.0))
+        for d in docs if d.get("doc_type") == "other_sources_income"
+        for field in ("dividends", "savings_interest", "fd_interest", "other_interest")
+    )
+    if extra_80d or extra_80c:
+        chapter_6a = dict(extracted.get("chapter_6A", {}))
+        chapter_6a["80D"] = float_safe(chapter_6a.get("80D", 0.0)) + extra_80d
+        chapter_6a["80C"] = float_safe(chapter_6a.get("80C", 0.0)) + extra_80c
+        chapter_6a["total"] = float_safe(chapter_6a.get("total", 0.0)) + extra_80d + extra_80c
+        extracted["chapter_6A"] = chapter_6a
+    if extra_other_sources:
+        other_income = dict(extracted.get("other_income", {}))
+        other_income["other_sources"] = float_safe(other_income.get("other_sources", 0.0)) + extra_other_sources
+        other_income["total"] = float_safe(other_income.get("total", 0.0)) + extra_other_sources
+        extracted["other_income"] = other_income
 
     ay_str = extracted.get("assessment_year") or state.get("ay", "AY2026-27")
     if not ay_str.startswith("AY"): ay_str = f"AY{ay_str}"

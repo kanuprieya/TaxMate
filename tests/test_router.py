@@ -40,9 +40,14 @@ def _capital_gains(txns):
 
 def _foreign_income(country="USA"):
     return {"doc_type": "foreign_income", "data": {
-        "foreign_income": [{"country": country, "foreign_income_amount": 100000, "foreign_tax_paid": 10000}],
+        "foreign_income": [{"country": country, "income_type": "other",
+                             "foreign_income_amount_inr": 100000, "foreign_tax_paid_inr": 10000}],
         "foreign_assets": [],
     }}
+
+
+def _non_resident_status(status="non_resident"):
+    return {"doc_type": "residential_status", "data": {"status": status, "days_in_india_current_year": 45}}
 
 
 class TestDetermineFormType:
@@ -82,28 +87,45 @@ class TestDetermineFormType:
     def test_total_income_at_50l_is_still_itr1(self):
         assert determine_form_type([_form16(gross=5000000)]) == "itr1"
 
+    def test_foreign_income_forces_itr2_regardless_of_other_thresholds(self):
+        """Real CBDT rule, not just an app-scope choice — ITR-1 is legally
+        unavailable to a filer with any foreign income/asset disclosure,
+        even a tiny amount well under every other ITR-1 threshold."""
+        assert determine_form_type([_form16(gross=500000), _foreign_income()]) == "itr2"
+
 
 class TestIsOutOfScope:
 
     def test_no_foreign_docs_is_in_scope(self):
         assert is_out_of_scope([_form16(), _properties(3)]) is None
 
-    def test_foreign_income_doc_is_out_of_scope(self):
-        message = is_out_of_scope([_form16(), _foreign_income("Germany")])
+    def test_resident_foreign_income_is_in_scope(self):
+        """Foreign income for a Resident filer is now computed (Schedule
+        FSI), not redirected — only residency status (checked separately
+        below) still blocks."""
+        assert is_out_of_scope([_form16(), _foreign_income("Germany")]) is None
+
+    def test_non_resident_status_is_out_of_scope(self):
+        message = is_out_of_scope([_form16(), _non_resident_status("non_resident")])
         assert message is not None
         assert "professional" in message
-        assert "Germany" in message
+        assert "Non-Resident" in message
+
+    def test_rnor_status_is_out_of_scope(self):
+        message = is_out_of_scope([_form16(), _non_resident_status("rnor")])
+        assert message is not None
+        assert "RNOR" in message
 
 
 class TestRunPipelineEndToEnd:
 
-    def test_foreign_income_short_circuits_before_either_graph(self):
+    def test_non_resident_short_circuits_before_either_graph(self):
         """The flag-and-redirect path must actually run end-to-end: no crash,
         no partial computation, a clear message, and a form_type that's
         neither 'itr1' nor 'itr2' so callers can't mistake it for a
         completed computation."""
         form_type, result = run_pipeline(
-            [_form16(), _foreign_income()], session_id="router-fi-1", ay="AY2026-27"
+            [_form16(), _non_resident_status()], session_id="router-nr-1", ay="AY2026-27"
         )
         assert form_type == "unsupported"
         assert "error" in result
@@ -111,7 +133,32 @@ class TestRunPipelineEndToEnd:
         assert "itr1_form" not in result
         assert "itr2_form" not in result
 
+    def test_foreign_income_routes_to_itr2_and_computes(self):
+        """Foreign income for a Resident filer must actually compute, not
+        redirect — end-to-end proof that Schedule FSI runs through the real
+        ITR-2 graph rather than only being exercised at the router level."""
+        form_type, result = run_pipeline(
+            [_form16(), _foreign_income()], session_id="router-fi-2", ay="AY2026-27"
+        )
+        assert form_type == "itr2"
+        assert "itr2_form" in result
+        assert result["itr2_form"]["foreign_income"][0]["foreign_income_amount_inr"] == 100000
+
     def test_domestic_only_still_routes_to_itr1(self):
         form_type, result = run_pipeline([_form16()], session_id="router-itr1-1", ay="AY2026-27")
         assert form_type == "itr1"
         assert "itr1_form" in result
+
+    def test_foreign_income_alone_with_no_form16_still_computes(self):
+        """A filer whose entire salary is foreign (no domestic Form 16 at
+        all) must still get a computed return, not a hard 'No Form 16
+        found' failure — found against a real all-foreign-salary workbook
+        uploaded on its own."""
+        form_type, result = run_pipeline(
+            [_foreign_income()], session_id="router-fi-no-form16", ay="AY2026-27"
+        )
+        assert form_type == "itr2"
+        assert result.get("error") is None
+        assert "itr2_form" in result
+        assert result["itr2_form"]["foreign_income"][0]["foreign_income_amount_inr"] == 100000
+        assert result["itr2_form"]["tax_computation"]["taxable_income"] > 0
