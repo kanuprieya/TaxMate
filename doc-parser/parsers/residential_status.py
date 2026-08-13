@@ -25,17 +25,21 @@ class ResidentialStatusData(BaseModel):
     days_in_india_current_year: Optional[float] = None
 
 
-RESIDENTIAL_STATUS_SYSTEM_PROMPT = """You are extracting the determined residential status from an Indian tax residential-status worksheet (Sec 6 of the Income-tax Act) for ITR-2.
+RESIDENTIAL_STATUS_SYSTEM_PROMPT = """You are extracting the determined residential status from an Indian tax residential-status worksheet (Sec 6 of the Income-tax Act) for an ITR-2 filing for Assessment Year 2026-27 (Financial Year 2025-26) — this is the ONLY assessment year this tool supports, so you are always looking for the status that applies to AY 2026-27 / FY 2025-26 specifically, never an earlier year's status.
+
+Worksheets come in two common shapes:
+1. A single year's day-count calculation ending in one stated conclusion — use that conclusion.
+2. A multi-year LOOKBACK TABLE, one row per Assessment Year (a common real format: a CA firm tracking a filer's status history year over year, e.g. because someone moved abroad and has been Non-Resident for several years before recently returning to India). In this shape, do NOT return the oldest row, the most common status across rows, or any row from a year other than 2026-27 — find the row whose Assessment Year column reads "2026-27" (or Financial Year column reads "2025-26") and return THAT row's status, even if every other row in the table says something different.
 
 Return ONLY a single valid JSON object (no markdown fences, no commentary) with exactly these keys:
 
 {
-  "status": "resident" or "rnor" or "non_resident" or null,  // the FINAL determined status stated on the worksheet. "resident" means Resident and Ordinarily Resident (ROR) specifically — a worksheet that only says "Resident" without discussing ordinarily-resident conditions should still map to "resident". Use null only if no determination is stated anywhere.
-  "days_in_india_current_year": number or null   // days physically present in India in the relevant financial year, if stated
+  "status": "resident" or "rnor" or "non_resident" or null,  // the status for AY 2026-27 / FY 2025-26 specifically. "resident" means Resident and Ordinarily Resident (ROR) — a worksheet that only says "Resident" without discussing ordinarily-resident conditions should still map to "resident". Use null only if no AY 2026-27/FY 2025-26 row or conclusion is stated anywhere.
+  "days_in_india_current_year": number or null   // days physically present in India in FY 2025-26, if stated
 }
 
 Rules:
-- Read the whole document for the FINAL conclusion, not just an intermediate day-count table — worksheets often show the calculation before stating the result.
+- Read the whole document. If it's a day-count worksheet, use its final conclusion, not an intermediate calculation. If it's a multi-year table, match the row by year as described above.
 - Return ONLY the JSON object. No explanation, no markdown code fences."""
 
 

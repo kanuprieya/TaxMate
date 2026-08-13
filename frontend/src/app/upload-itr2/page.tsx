@@ -202,11 +202,14 @@ function DropZone({
 
 // ── Main page ──────────────────────────────────────────────────────────────
 
+type ResidentialStatusAnswer = "resident" | "rnor" | "non_resident" | "unsure";
+
 export default function UploadItr2Page() {
   const router = useRouter();
   const [docs,     setDocs]     = useState<ParsedDoc[]>([]);
   const [running,  setRunning]  = useState(false);
   const [error,    setError]    = useState("");
+  const [residentialStatus, setResidentialStatus] = useState<ResidentialStatusAnswer>("unsure");
 
   const addDoc = (doc: ParsedDoc) => {
     setDocs((prev) => [...prev, doc]);
@@ -219,11 +222,27 @@ export default function UploadItr2Page() {
     setError("");
 
     try {
+      const parsedDocuments = docs.map((d) => ({ doc_type: d.doc_type, data: d.data }));
+
+      // A direct answer here is more reliable than making the user find and
+      // upload a worksheet just to state something they already know — but
+      // an actually-uploaded residential_status document (real evidence,
+      // e.g. a multi-year status history) takes precedence over a quick
+      // self-reported answer if both are present, so this only fills the
+      // gap when nothing was uploaded.
+      const hasUploadedResidentialStatusDoc = docs.some((d) => d.doc_type === "residential_status");
+      if (residentialStatus !== "unsure" && !hasUploadedResidentialStatusDoc) {
+        parsedDocuments.push({
+          doc_type: "residential_status",
+          data: { status: residentialStatus, days_in_india_current_year: null },
+        });
+      }
+
       const resp = await fetch(`${API}/api/pipeline/run`, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
         body:    JSON.stringify({
-          parsed_documents: docs.map((d) => ({ doc_type: d.doc_type, data: d.data })),
+          parsed_documents: parsedDocuments,
           session_id:       docs[0]?.session_id,
           ay:               "AY2026-27",
         }),
@@ -259,6 +278,56 @@ export default function UploadItr2Page() {
             Upload salary, capital gains, and house property documents — our AI handles
             multiple properties, equity/other capital gains, and regime comparison for AY 2026-27.
           </p>
+        </div>
+
+        {/* Residential status — asked upfront, not inferred */}
+        <div className="mb-10 glass-panel rounded-2xl p-6 border-2 border-brand-100 animate-fade-in">
+          <div className="flex items-start gap-3 mb-4">
+            <span className="text-2xl">🧭</span>
+            <div>
+              <div className="font-semibold text-gray-900">What's your residential status for FY 2025-26 (AY 2026-27)?</div>
+              <p className="text-sm text-gray-500 mt-1">
+                This determines whether this tool can compute your return at all. Foreign income for a
+                Non-Resident or RNOR filer is often not taxable in India — a wrong assumption here can change
+                the final answer entirely, not just a field.
+              </p>
+            </div>
+          </div>
+          <div className="grid sm:grid-cols-2 gap-3">
+            {([
+              { value: "resident",     label: "Resident (Ordinarily Resident)", hint: "Lived in India, no significant time abroad" },
+              { value: "rnor",         label: "RNOR", hint: "Recently returned to India after years abroad" },
+              { value: "non_resident", label: "Non-Resident", hint: "Living/working outside India this year" },
+              { value: "unsure",       label: "Not sure", hint: "Let me upload a worksheet, or determine this with a professional" },
+            ] as const).map((opt) => (
+              <label
+                key={opt.value}
+                className={`flex items-start gap-3 rounded-xl p-3.5 cursor-pointer transition-all border-2
+                  ${residentialStatus === opt.value
+                    ? "border-brand-400 bg-brand-50/80 shadow-sm"
+                    : "border-gray-100 bg-white/50 hover:border-brand-200"}`}
+              >
+                <input
+                  type="radio"
+                  name="residential-status"
+                  className="mt-1"
+                  checked={residentialStatus === opt.value}
+                  onChange={() => setResidentialStatus(opt.value)}
+                />
+                <div>
+                  <div className="text-sm font-semibold text-gray-800">{opt.label}</div>
+                  <div className="text-xs text-gray-500 mt-0.5">{opt.hint}</div>
+                </div>
+              </label>
+            ))}
+          </div>
+          {(residentialStatus === "non_resident" || residentialStatus === "rnor") && (
+            <div className="mt-4 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+              ⚠️ This tool only computes returns for Residents (Ordinarily Resident). Submitting with this
+              answer will flag your filing as out of scope and redirect you to a tax professional, rather
+              than compute a result that doesn't apply to you.
+            </div>
+          )}
         </div>
 
         {/* Upload zones */}
