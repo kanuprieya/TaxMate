@@ -52,11 +52,12 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     const allowed = [
       "application/pdf", "image/jpeg", "image/png",
-      // .xlsx / .xlsm — some browsers/OSes send the generic octet-stream
-      // type instead of the spreadsheet-specific one; doc-parser itself
-      // does the stricter extension+mimetype check on top of this.
+      // .xlsx / .xlsm / .xls — some browsers/OSes send the generic octet-
+      // stream type instead of the spreadsheet-specific one; doc-parser
+      // itself does the stricter extension+mimetype check on top of this.
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       "application/vnd.ms-excel.sheet.macroEnabled.12",
+      "application/vnd.ms-excel", // legacy .xls — common for older broker/CAMS exports
       "application/octet-stream",
     ];
     cb(null, allowed.includes(file.mimetype));
@@ -131,9 +132,10 @@ app.post(
       // content alone would have no way to fall back to the right parser.
       // PDF/JPG/PNG uploads are untouched: same legacy-endpoint routing as
       // always.
-      const isExcel = /\.xls[mx]$/i.test(req.file.originalname || "")
+      const isExcel = /\.xls[mx]?$/i.test(req.file.originalname || "")
         || req.file.mimetype === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        || req.file.mimetype === "application/vnd.ms-excel.sheet.macroEnabled.12";
+        || req.file.mimetype === "application/vnd.ms-excel.sheet.macroEnabled.12"
+        || req.file.mimetype === "application/vnd.ms-excel";
 
       const endpoint = (docType === "auto" || isExcel)
         ? "/parse/auto"
@@ -149,7 +151,11 @@ app.post(
         method: "POST",
         body:   form,
         headers: form.getHeaders(),
-        timeout: 45000,
+        // LLM-based extraction (form16/capital_gains/property/foreign_income
+        // etc.) can genuinely take 20-30s+ on a cold call — 45s cut this too
+        // close and produced real "network timed out" failures on otherwise-
+        // valid uploads, not just genuinely stuck requests.
+        timeout: 90000,
       });
 
       if (!resp.ok) {

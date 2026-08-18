@@ -44,10 +44,18 @@ try:
 except ImportError:
     openpyxl = None
 
-EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
+try:
+    import xlrd  # legacy .xls (binary format) — openpyxl only reads the OOXML .xlsx/.xlsm zip format
+except ImportError:
+    xlrd = None
+
+LEGACY_XLS_EXTENSIONS = {".xls"}
+EXCEL_EXTENSIONS = {".xlsx", ".xlsm"} | LEGACY_XLS_EXTENSIONS
 EXCEL_CONTENT_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-excel.sheet.macroEnabled.12",  # .xlsm
+    "application/vnd.ms-excel",  # .xls — common real-world case: older broker/CAMS
+                                  # capital-gains exports are frequently this legacy format
     # Some browsers/OSes send this generic type for .xlsx/.xlsm instead of
     # the correct ones above — accepted here only in combination with a
     # matching filename extension (see _validate_file).
@@ -268,10 +276,10 @@ async def _validate_file(file: UploadFile):
     ext = Path(file.filename or "").suffix.lower()
     if ext in EXCEL_EXTENSIONS:
         if file.content_type not in EXCEL_CONTENT_TYPES:
-            raise HTTPException(400, "Only PDF, JPG, PNG, XLSX, XLSM allowed")
+            raise HTTPException(400, "Only PDF, JPG, PNG, XLSX, XLSM, XLS allowed")
         return
     if file.content_type not in {"application/pdf", "image/jpeg", "image/png"}:
-        raise HTTPException(400, "Only PDF, JPG, PNG, XLSX, XLSM allowed")
+        raise HTTPException(400, "Only PDF, JPG, PNG, XLSX, XLSM, XLS allowed")
 
 
 def _extract_excel_text(path: Path) -> str:
@@ -288,7 +296,14 @@ def _extract_excel_text(path: Path) -> str:
     column-name assumptions are made here; broker/bank/employer exports
     don't share a common schema, so interpreting the columns is left to
     each parser (LLM extraction, where available, reads the whole row for
-    context rather than assuming a fixed position)."""
+    context rather than assuming a fixed position).
+
+    .xls (legacy binary format, common for older broker/CAMS capital-gains
+    exports) is a completely different file format from .xlsx/.xlsm despite
+    the similar extension — openpyxl only reads the OOXML zip format, so
+    that branch goes through xlrd instead."""
+    if Path(path).suffix.lower() in LEGACY_XLS_EXTENSIONS:
+        return "\n".join(_iter_xls_rows_as_lines(path))
     if openpyxl is None:
         raise RuntimeError("openpyxl is not installed — cannot parse .xlsx files")
     # read_only workbooks hold the underlying zip file open until closed
@@ -308,12 +323,34 @@ def _extract_excel_text(path: Path) -> str:
     return "\n".join(lines)
 
 
+def _iter_xls_rows_as_lines(path: Path) -> list:
+    if xlrd is None:
+        raise RuntimeError("xlrd is not installed — cannot parse legacy .xls files")
+    book = xlrd.open_workbook(str(path))
+    lines = []
+    for sheet in book.sheets():
+        for row_idx in range(sheet.nrows):
+            cells = [str(c.value) for c in sheet.row(row_idx) if c.value not in (None, "")]
+            if cells:
+                lines.append(" ".join(cells))
+    return lines
+
+
 def _extract_excel_rows(path: Path) -> list:
     """Raw row/cell data (all sheets concatenated) for parsers that classify
     row-by-row — currently only parse_bank_statement_from_rows, which mirrors
     the same [Date, Description, Debit, Credit, Balance]-style row shape a
     pdfplumber table extraction produces. Every other .xlsx-aware parser
     consumes flattened text from _extract_excel_text instead."""
+    if Path(path).suffix.lower() in LEGACY_XLS_EXTENSIONS:
+        if xlrd is None:
+            raise RuntimeError("xlrd is not installed — cannot parse legacy .xls files")
+        book = xlrd.open_workbook(str(path))
+        rows = []
+        for sheet in book.sheets():
+            for row_idx in range(sheet.nrows):
+                rows.append([c.value if c.value != "" else None for c in sheet.row(row_idx)])
+        return rows
     if openpyxl is None:
         raise RuntimeError("openpyxl is not installed — cannot parse .xlsx files")
     wb = openpyxl.load_workbook(path, data_only=True, read_only=True)

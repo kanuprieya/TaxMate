@@ -139,6 +139,23 @@ def _call_provider(provider: dict, messages: list[dict], temperature: float) -> 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+# A real CAMS mutual-fund capital-gains statement produced 100K+ characters
+# of extracted text and got a hard 413 "Request too large" from the smaller
+# fallback model — deterministic and guaranteed to recur for any sufficiently
+# large real document (not just capital gains; any doc-parser call routed
+# through this client is exposed the same way). The prompts calling this
+# (form16.py, capital_gains.py, property.py, foreign_income.py, etc.) all ask
+# for a SUMMARY/TOTAL figure, and the ones that print such a total tend to
+# state it near the top of the document, before the page after page of
+# per-transaction/per-scheme detail that follows — so truncating from the
+# front rather than the back keeps the useful part in the overwhelming
+# majority of real layouts. This is a blunt safety net, not a substitute for
+# each parser choosing what to send; it exists so "too large" is never a
+# silent full-extraction failure again, only a possible loss of long-tail
+# detail past this cutoff.
+MAX_PROMPT_CHARS = 15000
+
+
 def complete(
     prompt:      str,
     system:      Optional[str] = None,
@@ -160,6 +177,9 @@ def complete(
     Raises:
         RuntimeError: If all providers fail.
     """
+    if len(prompt) > MAX_PROMPT_CHARS:
+        prompt = prompt[:MAX_PROMPT_CHARS] + "\n\n[...document truncated — too large to send in full...]"
+
     messages = []
     if system:
         messages.append({"role": "system", "content": system})

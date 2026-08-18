@@ -110,7 +110,7 @@ function DropZone({
   label,
   hint,
   docType,
-  accept = ".pdf,image/jpeg,image/png,.xlsx,.xlsm,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12",
+  accept = ".pdf,image/jpeg,image/png,.xlsx,.xlsm,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.ms-excel",
   onParsed,
 }: {
   label:    string;
@@ -250,7 +250,13 @@ export default function UploadItr2Page() {
       const result = await resp.json();
       if (!resp.ok || !result.success) throw new Error(result.message || result.error || "Pipeline failed");
 
-      router.push(`/form-itr2?session=${result.session_id}`);
+      // The documents actually uploaded here decide itr1 vs itr2 eligibility
+      // (see graph/router.py) — this page's own branding doesn't force it.
+      // A filer with no capital-gains/3rd-property/foreign-income trigger
+      // gets a real, valid itr1_form result; redirecting to /form-itr2
+      // regardless would show "Session not found" since that page only
+      // ever looks for itr2_form.
+      router.push(result.form_type === "itr1" ? `/form?session=${result.session_id}` : `/form-itr2?session=${result.session_id}`);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Pipeline failed");
     } finally {

@@ -85,6 +85,51 @@ CAPITAL_GAINS_PATTERNS = {
 }
 
 
+def _parse_cams_overall_summary(text: str) -> list[dict]:
+    """CAMS mutual-fund 'Capital Gain / Loss – Overall Summary' format: a
+    quarterly-breakdown table per section ('...Summary - Equity' / '...
+    Summary - Other than Equity' or similar), each Short/Long Term row
+    ending in a Total column, with no currency marker anywhere ('Short Term
+    Capital Gain/Loss 4643.6 11882.55 7411.68 0 0 23937.83' — bare numbers).
+    Found against a real CAMS statement neither the LLM path (only fixable
+    by capping how much text gets sent — see shared/llm_client.py's
+    MAX_PROMPT_CHARS) nor CAPITAL_GAINS_PATTERNS above could read: the
+    mandatory-CURRENCY-marker fix that made the summary patterns above
+    reliable on statements that DO print 'Rs.' is exactly what rules out
+    matching this format, which never does.
+
+    Takes the LAST number on each 'Short/Long Term Capital Gain(/Loss)' line
+    as that row's Total-column figure — every real sample of this format
+    puts the running Total in the final column."""
+    entries = []
+    sections = re.split(r"(?=Overall Summary)", text, flags=re.IGNORECASE)
+    for section in sections:
+        header = re.search(r"Overall Summary\s*-?\s*(equity|other than equity|debt)?", section, re.IGNORECASE)
+        is_equity = bool(header and header.group(1) and "equity" in header.group(1).lower() and "other" not in header.group(1).lower())
+        asset_type = "equity_stt" if is_equity else "other"
+
+        for line in section.splitlines():
+            row = re.match(r"\s*(Short|Long)\s*[\s-]*Term\s+Capital\s+Gain(?:/Loss)?\b(.*)", line, re.IGNORECASE)
+            if not row:
+                continue
+            numbers = re.findall(r"-?[\d,]+\.\d+|-?[\d,]+", row.group(2))
+            if not numbers:
+                continue
+            total = parse_indian_amount(numbers[-1])
+            if total <= 0:
+                continue
+            is_long_term = row.group(1).lower() == "long"
+            holding_months = (13 if is_equity else 30) if is_long_term else 6
+            entries.append({
+                "asset_type": asset_type,
+                "description": f"CAMS {row.group(1).title()} Term Capital Gain ({'Equity' if is_equity else 'Other'})",
+                "holding_period_months": holding_months,
+                "sale_value": total,
+                "cost_of_acquisition": 0.0,
+            })
+    return entries
+
+
 def parse_capital_gains_regex(text: str) -> dict:
     result = {
         "doc_type": "capital_gains",
@@ -92,6 +137,12 @@ def parse_capital_gains_regex(text: str) -> dict:
         "parse_confidence": 0.0,
         "warnings": [],
     }
+
+    cams_entries = _parse_cams_overall_summary(text)
+    if cams_entries:
+        result["capital_gains_raw"] = cams_entries
+        result["parse_confidence"] = 0.6
+        return result
 
     for bucket, (pattern, asset_type, holding_months) in CAPITAL_GAINS_PATTERNS.items():
         match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
