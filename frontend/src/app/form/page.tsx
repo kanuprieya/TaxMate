@@ -69,7 +69,7 @@ function FieldRow({
   // or the confidence-scoring this row is driven by loses its whole signal.
   const isMissing  = conf?.source === "missing";
   const display    = isAmount
-    ? (isMissing ? "—" : `₹${Number(value).toLocaleString("en-IN")}`)
+    ? (isMissing ? "—" : `₹${Number(value).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`)
     : (isMissing || !value ? "—" : String(value));
 
   const confColor =
@@ -159,7 +159,7 @@ function SectionCard({
         <div className="px-6 py-4 bg-brand-50/50 border-t border-brand-100/30 flex justify-between items-center backdrop-blur-sm">
           <span className="text-sm font-semibold text-brand-800">{total.label}</span>
           <span className="text-base font-bold text-brand-900 font-mono tracking-tight">
-            ₹{total.value.toLocaleString("en-IN")}
+            ₹{total.value.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
           </span>
         </div>
       )}
@@ -286,6 +286,7 @@ function FormPageInner() {
   const tc     = form.tax_computation as Record<string, number | string>;
   const sal    = form.salary_income as Record<string, number | string>;
   const ded    = form.deductions as Record<string, number | string>;
+  const hp     = form.house_property as Record<string, number | string>;
   const os     = form.other_sources as Record<string, number | string>;
   const regime = String(tc?.regime || "new");
 
@@ -386,6 +387,9 @@ function FormPageInner() {
             <FieldRow label="HRA Exemption [10(13A)]" fieldPath="salary_income.allowances_exempt_10_13a"
               value={Number(sal?.allowances_exempt_10_13a || 0)} conf={F("salary_income.allowances_exempt_10_13a")}
               onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
+            <FieldRow label="Other Exempt Allowances [10(5)/10(14)/etc.]" fieldPath="salary_income.allowances_exempt_other"
+              value={Number(sal?.allowances_exempt_other || 0)} conf={F("salary_income.allowances_exempt_other")}
+              onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
             <FieldRow label="Standard Deduction [16(ia)]" fieldPath="salary_income.standard_deduction_16ia"
               value={Number(sal?.standard_deduction_16ia || 0)} conf={F("salary_income.standard_deduction_16ia")}
               onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
@@ -393,6 +397,19 @@ function FormPageInner() {
               value={Number(sal?.professional_tax_16iii || 0)} conf={F("salary_income.professional_tax_16iii")}
               onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
           </SectionCard>
+
+          {/* House Property — only rendered when non-zero: this figure still
+              feeds Gross Total Income below even when hidden, so a filer with
+              declared house-property income/loss needs to see it here or the
+              GTI total won't trace back to any visible line item. */}
+          {Number(hp?.total_income_hp || 0) !== 0 && (
+            <SectionCard title="Income from House Property (Schedule HP)" emoji="🏠" className="!delay-[350ms]"
+              total={{ label: "Income from House Property", value: Number(hp?.total_income_hp || 0) }}>
+              <FieldRow label="Interest on Home Loan [24(b)]" fieldPath="house_property.interest_on_loan_24b"
+                value={Number(hp?.interest_on_loan_24b || 0)} conf={F("house_property.interest_on_loan_24b")}
+                onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
+            </SectionCard>
+          )}
 
           {/* Other Sources */}
           <SectionCard title="Other Sources (Schedule OS)" emoji="💸" className="!delay-[400ms]"
@@ -477,7 +494,7 @@ function FormPageInner() {
               <>
                 <div className="text-sm font-bold uppercase tracking-widest text-success-100 mb-2">Net Result</div>
                 <div className="text-4xl font-extrabold font-mono tracking-tight">
-                  Refund: ₹{refundAmt.toLocaleString("en-IN")}
+                  Refund: ₹{refundAmt.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
                 </div>
                 <div className="text-sm mt-2 text-success-100 font-medium">Expected refund to your linked bank account</div>
               </>
@@ -485,7 +502,7 @@ function FormPageInner() {
               <>
                 <div className="text-sm font-bold uppercase tracking-widest text-amber-100 mb-2">Net Result</div>
                 <div className="text-4xl font-extrabold font-mono tracking-tight">
-                  Tax Due: ₹{Number(tc?.tax_payable || 0).toLocaleString("en-IN")}
+                  Tax Due: ₹{Number(tc?.tax_payable || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
                 </div>
                 <div className="text-sm mt-2 text-amber-100 font-medium">Please pay this amount before filing</div>
               </>

@@ -92,6 +92,12 @@ class CapitalGainsSummary(BaseModel):
     stcg_111a:     float = 0.0
     ltcg_112a:     float = 0.0
     ltcg_112_other: float = 0.0
+    # Non-equity short-term gains: taxed at slab rate (not a special rate),
+    # folded into other_source_income/taxable_income — correctly 87A-eligible,
+    # unlike the three buckets above. Kept here purely for display, so a
+    # filer can see where this slice of their slab tax comes from instead of
+    # it being an invisible addition on top of salary.
+    stcg_slab:     float = 0.0
     capital_gains_tax: float = 0.0
 
 

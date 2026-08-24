@@ -95,7 +95,7 @@ class TestCapitalGains:
                 {"asset_type": "equity_stt", "holding_period_months": 24, "sale_value": 300000, "cost_of_acquisition": 200000},
             ],
         })
-        assert result["capital_gains"] == {"stcg_111a": 0.0, "ltcg_112a": 100000.0, "ltcg_112_other": 0.0}
+        assert result["capital_gains"] == {"stcg_111a": 0.0, "ltcg_112a": 100000.0, "ltcg_112_other": 0.0, "stcg_slab": 0.0}
         assert result["capital_gains_tax"] == 0.0
         assert result["total_tax"] == 0
 
@@ -132,7 +132,7 @@ class TestCapitalGains:
                 {"asset_type": "other", "holding_period_months": 30, "sale_value": 800000, "cost_of_acquisition": 500000},
             ],
         })
-        assert result["capital_gains"] == {"stcg_111a": 200000.0, "ltcg_112a": 1500000.0, "ltcg_112_other": 300000.0}
+        assert result["capital_gains"] == {"stcg_111a": 200000.0, "ltcg_112a": 1500000.0, "ltcg_112_other": 300000.0, "stcg_slab": 40000.0}
         assert result["capital_gains_tax"] == 249375.0
         assert result["taxable_income"] == 65000
         assert result["total_tax"] == 259350
@@ -188,7 +188,7 @@ class TestCombinedScenario:
         })
         assert result["house_property_income"] == 174000
         assert result["house_property_loss_carried_forward"] == 0.0
-        assert result["capital_gains"] == {"stcg_111a": 0.0, "ltcg_112a": 400000.0, "ltcg_112_other": 0.0}
+        assert result["capital_gains"] == {"stcg_111a": 0.0, "ltcg_112a": 400000.0, "ltcg_112_other": 0.0, "stcg_slab": 0.0}
         assert result["capital_gains_tax"] == 34375.0
         assert result["taxable_income"] == 1599000
         assert result["total_tax"] == 160394

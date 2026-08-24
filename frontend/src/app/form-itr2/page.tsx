@@ -64,7 +64,7 @@ function FieldRow({
   const isAmount   = typeof value === "number";
   const isMissing  = conf?.source === "missing";
   const display    = isAmount
-    ? (isMissing ? "—" : `₹${Number(value).toLocaleString("en-IN")}`)
+    ? (isMissing ? "—" : `₹${Number(value).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`)
     : (isMissing || !value ? "—" : String(value));
 
   const confColor =
@@ -156,7 +156,7 @@ function SectionCard({
         <div className="px-6 py-4 bg-brand-50/50 border-t border-brand-100/30 flex justify-between items-center backdrop-blur-sm">
           <span className="text-sm font-semibold text-brand-800">{total.label}</span>
           <span className="text-base font-bold text-brand-900 font-mono tracking-tight">
-            ₹{total.value.toLocaleString("en-IN")}
+            ₹{total.value.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
           </span>
         </div>
       )}
@@ -301,7 +301,8 @@ function FormItr2PageInner() {
   const hasCapitalGains = totalCgTax > 0
     || Number(cgSummary?.stcg_111a || 0) > 0
     || Number(cgSummary?.ltcg_112a || 0) > 0
-    || Number(cgSummary?.ltcg_112_other || 0) > 0;
+    || Number(cgSummary?.ltcg_112_other || 0) > 0
+    || Number(cgSummary?.stcg_slab || 0) > 0;
 
   return (
     <div className="min-h-screen relative pb-24">
@@ -376,8 +377,17 @@ function FormItr2PageInner() {
             <FieldRow label="Gross Salary" fieldPath="salary_income.gross_salary"
               value={Number(sal?.gross_salary || 0)} conf={F("salary_income.gross_salary")}
               onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
+            <FieldRow label="HRA Exemption [10(13A)]" fieldPath="salary_income.allowances_exempt_10_13a"
+              value={Number(sal?.allowances_exempt_10_13a || 0)} conf={F("salary_income.allowances_exempt_10_13a")}
+              onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
+            <FieldRow label="Other Exempt Allowances [10(5)/10(14)/etc.]" fieldPath="salary_income.allowances_exempt_other"
+              value={Number(sal?.allowances_exempt_other || 0)} conf={F("salary_income.allowances_exempt_other")}
+              onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
             <FieldRow label="Standard Deduction [16(ia)]" fieldPath="salary_income.standard_deduction_16ia"
               value={Number(sal?.standard_deduction_16ia || 0)} conf={F("salary_income.standard_deduction_16ia")}
+              onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
+            <FieldRow label="Professional Tax [16(iii)]" fieldPath="salary_income.professional_tax_16iii"
+              value={Number(sal?.professional_tax_16iii || 0)} conf={F("salary_income.professional_tax_16iii")}
               onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
           </SectionCard>
 
@@ -395,7 +405,7 @@ function FormItr2PageInner() {
               ))}
               {Number(form.house_property_loss_carried_forward || 0) > 0 && (
                 <div className="text-xs text-amber-700 bg-amber-50/80 rounded-md px-3 py-2 border border-amber-100/50 mt-2">
-                  ₹{Number(form.house_property_loss_carried_forward).toLocaleString("en-IN")} in HP loss carried forward
+                  ₹{Number(form.house_property_loss_carried_forward).toLocaleString("en-IN", { maximumFractionDigits: 0 })} in HP loss carried forward
                   (Sec 71(3A) caps loss set-off at ₹2,00,000/year).
                 </div>
               )}
@@ -415,6 +425,18 @@ function FormItr2PageInner() {
               <FieldRow label="LTCG u/s 112 (other assets, 12.5%)" fieldPath="capital_gains_summary.ltcg_112_other"
                 value={Number(cgSummary?.ltcg_112_other || 0)}
                 onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
+              {Number(cgSummary?.stcg_slab || 0) > 0 && (
+                <>
+                  <FieldRow label="STCG (non-equity, slab rate — not shown above)" fieldPath="capital_gains_summary.stcg_slab"
+                    value={Number(cgSummary?.stcg_slab || 0)}
+                    onEdit={(f, l, v) => setEditTarget({ field: f, label: l, value: v })} />
+                  <div className="text-xs text-gray-500 bg-gray-50/80 rounded-md px-3 py-2 border border-gray-100/50 mt-2">
+                    This gain isn't taxed at a special rate — it's added to your ordinary
+                    income above and taxed (and 87A-rebated) at slab rate like salary,
+                    which is why it doesn't appear in the special-rate tax total below.
+                  </div>
+                </>
+              )}
             </SectionCard>
           )}
 
@@ -533,7 +555,7 @@ function FormItr2PageInner() {
               <>
                 <div className="text-sm font-bold uppercase tracking-widest text-success-100 mb-2">Net Result</div>
                 <div className="text-4xl font-extrabold font-mono tracking-tight">
-                  Refund: ₹{refundAmt.toLocaleString("en-IN")}
+                  Refund: ₹{refundAmt.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
                 </div>
                 <div className="text-sm mt-2 text-success-100 font-medium">Expected refund to your linked bank account</div>
               </>
@@ -541,7 +563,7 @@ function FormItr2PageInner() {
               <>
                 <div className="text-sm font-bold uppercase tracking-widest text-amber-100 mb-2">Net Result</div>
                 <div className="text-4xl font-extrabold font-mono tracking-tight">
-                  Tax Due: ₹{Number(tc?.tax_payable || 0).toLocaleString("en-IN")}
+                  Tax Due: ₹{Number(tc?.tax_payable || 0).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
                 </div>
                 <div className="text-sm mt-2 text-amber-100 font-medium">Please pay this amount before filing</div>
               </>

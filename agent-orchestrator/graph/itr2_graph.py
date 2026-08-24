@@ -227,6 +227,14 @@ def node_fill_form(state: ITR2AgentState) -> dict:
         form.salary_income.gross_salary = val("gross_salary")
         form.salary_income.net_salary = val("salary_income")
         form.salary_income.taxable_salary = val("taxable_salary")
+        form.salary_income.allowances_exempt_10_13a = val("hra_exemption")
+        # total_exemptions (what net_salary is actually computed from) can
+        # exceed hra_exemption alone — LTA/10(14)/other allowances the Form 16
+        # lumped in without breaking out. Surface the residual so the salary
+        # breakdown a filer sees actually sums to taxable_salary instead of
+        # leaving an unexplained gap. Mirrors the same fix in itr_graph.py.
+        form.salary_income.total_exempt_allowances = val("total_exemptions")
+        form.salary_income.allowances_exempt_other = max(0.0, val("total_exemptions") - val("hra_exemption"))
         form.salary_income.standard_deduction_16ia = val("standard_deduction")
         form.salary_income.professional_tax_16iii = val("professional_tax")
 
@@ -236,6 +244,11 @@ def node_fill_form(state: ITR2AgentState) -> dict:
         form.capital_gains_summary.stcg_111a = float_safe(cg.get("stcg_111a", 0.0))
         form.capital_gains_summary.ltcg_112a = float_safe(cg.get("ltcg_112a", 0.0))
         form.capital_gains_summary.ltcg_112_other = float_safe(cg.get("ltcg_112_other", 0.0))
+        # Non-equity short-term gains: taxed at slab rate (folded into
+        # taxable_income, not shown at a special rate below) — without this,
+        # this bucket inflates tax_before_rebate with no line item anywhere
+        # to explain it, which reads as an unexplained/double-counted figure.
+        form.capital_gains_summary.stcg_slab = float_safe(cg.get("stcg_slab", 0.0))
         form.capital_gains_summary.capital_gains_tax = val("capital_gains_tax")
 
         form.foreign_income = [
