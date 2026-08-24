@@ -355,6 +355,12 @@ def compute_capital_gains(state: dict, params: dict) -> dict:
         "stcg_111a": round(max(0.0, stcg_111a), 2),
         "ltcg_112a": round(max(0.0, ltcg_112a), 2),
         "ltcg_112_other": round(max(0.0, ltcg_112_other), 2),
+        # Slab-rate bucket, unlike the three above — folded into
+        # other_source_income below like any other slab-taxed income, but
+        # recorded here too so downstream consumers can show where this
+        # slice of taxable_income actually came from instead of leaving it
+        # an invisible addition on top of salary.
+        "stcg_slab": round(max(0.0, stcg_slab), 2),
     }
     state["capital_gains_breakdown"] = breakdown
     state["other_source_income"] = state.get("other_source_income", 0.0) + stcg_slab

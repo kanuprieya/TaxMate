@@ -248,6 +248,13 @@ def node_fill_form(state: AgentState) -> dict:
         form.salary_income.net_salary = val("salary_income")
         form.salary_income.taxable_salary = val("taxable_salary")
         form.salary_income.allowances_exempt_10_13a = val("hra_exemption")
+        # total_exemptions (what net_salary is actually computed from) can
+        # exceed hra_exemption alone — LTA/10(14)/other allowances the Form 16
+        # lumped in without breaking out. Surface the residual so the salary
+        # breakdown a filer sees actually sums to taxable_salary instead of
+        # leaving an unexplained gap.
+        form.salary_income.total_exempt_allowances = val("total_exemptions")
+        form.salary_income.allowances_exempt_other = max(0.0, val("total_exemptions") - val("hra_exemption"))
         form.salary_income.standard_deduction_16ia = val("standard_deduction")
         form.salary_income.professional_tax_16iii = val("professional_tax")
         
@@ -279,7 +286,13 @@ def node_fill_form(state: AgentState) -> dict:
             form.tax_computation.tax_payable = abs(rop)
 
         # Map Schedule OS and HP
+        # hp_raw feeds gross_total_income unconditionally in
+        # shared.tax_engine.primitives.aggregate_gross_income regardless of
+        # sign — total_income_hp must be set for both signs too, or a
+        # positive house-property figure inflates GTI with no line item
+        # anywhere on the form to explain it.
         hp_raw = extracted.get("other_income", {}).get("house_property", 0.0)
+        form.house_property.total_income_hp = hp_raw
         form.house_property.interest_on_loan_24b = abs(hp_raw) if hp_raw < 0 else 0.0
         form.other_sources.savings_bank_interest = extracted.get("other_income", {}).get("other_sources", 0.0)
 

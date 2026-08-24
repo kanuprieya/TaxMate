@@ -180,15 +180,15 @@ function RegimeCard({ sessionId }: { sessionId: string }) {
       <div className="grid grid-cols-3 gap-4">
         <div className="bg-gray-50 rounded-xl p-3 text-center border border-gray-100">
           <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Old Regime</div>
-          <div className="text-sm font-semibold text-gray-800 font-mono">₹{regime.old_tax.toLocaleString("en-IN")}</div>
+          <div className="text-sm font-semibold text-gray-800 font-mono">₹{regime.old_tax.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</div>
         </div>
         <div className="bg-gray-50 rounded-xl p-3 text-center border border-gray-100">
           <div className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">New Regime</div>
-          <div className="text-sm font-semibold text-gray-800 font-mono">₹{regime.new_tax.toLocaleString("en-IN")}</div>
+          <div className="text-sm font-semibold text-gray-800 font-mono">₹{regime.new_tax.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</div>
         </div>
         <div className="bg-success-500 text-white rounded-xl p-3 text-center shadow-sm">
           <div className="text-[10px] font-bold text-success-100 uppercase tracking-wide mb-1">Total Savings</div>
-          <div className="text-sm font-bold font-mono">₹{regime.saving.toLocaleString("en-IN")}</div>
+          <div className="text-sm font-bold font-mono">₹{regime.saving.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</div>
         </div>
       </div>
     </div>
