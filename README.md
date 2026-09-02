@@ -779,23 +779,3 @@ The websites (incometax.gov.in pages, ClearTax) are scraped automatically by `sc
 
 ---
 
-## 10. Interview cheat sheet
-
-| Question | Answer |
-|----------|--------|
-| Why microservices? | Different scaling profiles — parser runs once per upload, RAG runs per query, agent runs per pipeline trigger. Language heterogeneity is justified: Python for ML ecosystem, Node for async I/O orchestration |
-| Why Python for RAG/AI? | LangGraph, pdfplumber, FAISS, sentence-transformers — no equivalent in Node. Would lose 80% of ML tooling |
-| Why Node.js for gateway? | Event-driven non-blocking I/O is the correct tool for orchestrating async calls to multiple Python microservices. Justifiable, not arbitrary |
-| Why FAISS not Pinecone? | FAISS locally (zero cost, full control, fast for demo). Pinecone for production scale (managed, auto-scaling). Shows you know the tradeoff |
-| How do you prevent hallucination? | RAG grounds answers in retrieved context. Confidence scoring flags fields not found in documents. Validator catches tax rule violations. The explain node is deterministic string formatting off already-computed numbers — no LLM in the loop for the numbers themselves |
-| How is it AY-updatable? | Versioned FAISS namespaces (e.g. AY2024-25, AY2026-27, AY2026-27_ITR2). New AY: ingest new PDFs + re-run embedder → only RAG service redeploys. Per-AY configs live in shared/tax_engine, consumed by tax_utils_itr2.py |
-| What does LangGraph add over raw prompting? | Models the pipeline as a state machine — each node has a defined contract (input state, output state). Resumable, testable in isolation, clear separation of concerns. Visualisable as a graph for viva |
-| What does the eligibility router actually gate? | Only Non-Resident/RNOR status — everything else (salary, any number of house properties, other sources, capital gains, foreign income for Residents) is computed by the one pipeline. Keeps that one legal distinction out of the pipeline nodes themselves |
-| Is the explain node an LLM call? | No — it's deterministic string formatting off numbers the earlier nodes already computed, so there's no hallucination risk on the figures. The LLM is used elsewhere: RAG chat, and the LLM-assisted document parsers (capital gains, property, foreign income) where layouts vary too much for regex |
-| Why MMR retrieval? | Prevents 5 near-identical chunks being returned for a query. Balances relevance (similarity to query) with diversity (dissimilarity to already-selected chunks). Lambda=0.6 weights relevance higher |
-| What is the cross-encoder for? | Re-ranks the 5 MMR results with a more expensive but accurate model. Bi-encoder (used for FAISS) is fast but approximate. Cross-encoder sees query+document together, much better precision |
-| Why a 3-provider LLM fallback chain? | Groq and OpenRouter both expose free, OpenAI-compatible APIs; `shared/llm_client.py` tries Groq, then OpenRouter, then paid OpenAI (gpt-4o-mini) only if both fail. Keeps the whole system runnable at $0 API cost for most users while still degrading gracefully |
-| How does the tax computation work? | Deterministic Python math — config-driven engine in shared/tax_engine, invoked via tax_utils_itr2.py. NOT LLM inference. Exact statutory slab rates, 4% cess, marginal relief for surcharge, 3-component HRA minimum, Sec 111A/112/112A capital gains rates, Schedule FSI foreign tax credit. Covered by unit tests across several test files (tax_engine, tax_engine_itr2, validator_itr2, capital_gains_parser) |
-| What if Form 16 is scanned/image-based? | Parser returns parse_confidence < 0.5 and warns user. Fix: run `ocrmypdf scanned.pdf output.pdf` before uploading, which adds a text layer |
-| How is the validator different from the form filler? | Validator is a separate LangGraph node that runs after filling, checks cross-field rules (regime consistency, house-property loss sign, capital-gains sign, income consistency), and produces structured ValidationFlag objects with severities |
-| Why LLM-assisted extraction for capital gains/property/foreign income but regex for Form 16? | Form 16 has a CBDT-mandated TRACES layout that's predictable enough for regex. Broker/CAMS capital gains statements and property/foreign income documents vary far more in layout across issuers, so those parsers use an LLM extraction pass (`parsers/_llm_common.py`) instead, chunking large documents so extraction doesn't fail on long statements |
