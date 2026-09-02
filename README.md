@@ -1,12 +1,8 @@
 # TaxMate — Complete Project Documentation
 
-**What it is:** An AI-powered system that reads your tax documents (Form 16, bank statements, capital gains statements, property/home loan certificates, insurance premium receipts, AIS/26AS/TIS, foreign income disclosures — PDF, Excel, or legacy .xls), automatically fills every field of the correct ITR form, compares old vs new tax regime and recommends the better one, validates the filled form for errors, explains every filled field in plain English, and lets you ask questions about your taxes through a chat interface grounded in official CBDT sources.
+**What it is:** An AI-powered system that reads your tax documents (Form 16, bank statements, capital gains statements, property/home loan certificates, insurance premium receipts, AIS/26AS/TIS, foreign income disclosures — PDF, Excel, or legacy .xls), automatically fills every field of your return — salary, house property (including multiple properties), other sources, capital gains, and foreign income (Schedule FSI, for Resident filers) — compares old vs new tax regime, validates the filled return for errors, explains the computation in plain English, and lets you ask questions about your taxes through a chat interface grounded in official CBDT sources.
 
-**Who it is for:** Resident individuals filing for AY 2026-27. A router (`agent-orchestrator/graph/router.py`) looks at the uploaded documents and picks one of two pipelines automatically:
-- **ITR-1 (Sahaj)** — salary income, up to two house properties, other sources, total income up to ₹50 lakh, no capital gains beyond a small Sec 112A LTCG exemption.
-- **ITR-2** — capital gains (equity/non-equity, Sec 111A/112/112A), three or more house properties, or foreign income/assets for a Resident filer (computed via Schedule FSI).
-
-Non-Resident/RNOR filers are explicitly out of scope (flagged and redirected, not silently mis-computed) — see [Limitations](#9-limitations).
+**Who it is for:** Resident individuals filing for AY 2026-27, with any combination of salary, house property (any number of properties), other sources, capital gains (equity/non-equity, Sec 111A/112/112A), and foreign income/assets (computed via Schedule FSI with foreign tax credit under Sec 90/91). Non-Resident/RNOR filers are explicitly out of scope — the eligibility router flags and redirects them rather than silently mis-computing their return — see [Limitations](#9-limitations).
 
 ---
 
@@ -27,25 +23,25 @@ Non-Resident/RNOR filers are explicitly out of scope (flagged and redirected, no
 
 ## 1. How the whole system works
 
-Here is the complete user flow from opening the browser to getting a filled ITR-1:
+Here is the complete user flow from opening the browser to getting a filled return:
 
-**Step 1 — Upload documents.** The user goes to `http://localhost:3000/upload` (or `/upload-itr2` for the capital-gains/foreign-income flow) and drags in their documents — Form 16, bank statements, AIS/26AS/TIS, capital gains statements, property/home loan certificates, insurance premiums, residential-status declarations. PDF, `.xlsx`/`.xlsm`, and legacy `.xls` are all accepted. The frontend sends these to the API gateway at port 3001, which forwards them to the Doc Parser service at port 8002.
+**Step 1 — Upload documents.** The user goes to `http://localhost:3000/upload-itr2` and drags in their documents — Form 16, bank statements, AIS/26AS/TIS, capital gains statements, property/home loan certificates, insurance premiums, foreign income disclosures, residential-status declarations. PDF, `.xlsx`/`.xlsm`, and legacy `.xls` are all accepted. The frontend sends these to the API gateway at port 3001, which forwards them to the Doc Parser service at port 8002.
 
-**Step 2 — Document parsing.** The Doc Parser auto-detects the document type from its content (`POST /parse/auto`) and routes it to one of 13 specialized parsers in `doc-parser/parsers/`. For Form 16, it extracts gross salary, HRA exemption, standard deduction, professional tax, every deduction claimed (80C, 80D, 80CCD), and total TDS deducted. For bank statements it finds the transaction table, classifies each row as salary/savings interest/FD interest/TDS, and totals them up. For AIS/Form 26AS/TIS it cross-checks TDS credits and flags any discrepancy between what was deducted and what was actually deposited with the government. For capital gains, property, and foreign income documents (ITR-2-only) it uses an LLM-assisted extraction pass rather than pure regex, since these statements vary far more in layout than Form 16. Each parser returns a structured JSON object.
+**Step 2 — Document parsing.** The Doc Parser auto-detects the document type from its content (`POST /parse/auto`) and routes it to one of 13 specialized parsers in `doc-parser/parsers/`. For Form 16, it extracts gross salary, HRA exemption, standard deduction, professional tax, every deduction claimed (80C, 80D, 80CCD), and total TDS deducted. For bank statements it finds the transaction table, classifies each row as salary/savings interest/FD interest/TDS, and totals them up. For AIS/Form 26AS/TIS it cross-checks TDS credits and flags any discrepancy between what was deducted and what was actually deposited with the government. For capital gains, property, and foreign income documents it uses an LLM-assisted extraction pass rather than pure regex, since these statements vary far more in layout than Form 16. Each parser returns a structured JSON object.
 
-**Step 3 — Agent pipeline.** The parsed documents first pass through the eligibility router, which decides whether this filing is in scope at all (Non-Resident/RNOR is not) and, if so, whether it goes through the ITR-1 or ITR-2 pipeline (`agent-orchestrator/graph/router.py`). The chosen pipeline is sent to the Agent Orchestrator at port 8000, which runs a 5-node LangGraph pipeline — `graph/itr_graph.py` for ITR-1, or the structurally identical `graph/itr2_graph.py` for ITR-2:
+**Step 3 — Agent pipeline.** The parsed documents first pass through the eligibility router (`agent-orchestrator/graph/router.py`), which flags and redirects Non-Resident/RNOR filings — this codebase only computes returns for Resident and Ordinarily Resident filers. In-scope filings are sent to the Agent Orchestrator at port 8000, which runs a 5-node LangGraph pipeline (`graph/itr2_graph.py`):
 
-- **fill_form node** — maps every extracted field to the correct ITR-1 field path defined in `shared/itr1_schema.py`. Assigns a confidence score (0–1) and source citation to every field. Fields that came from a document get high confidence; fields that had to be inferred get lower confidence and are flagged for manual review.
-- **compare_regimes node** — runs the actual AY 2026-27 slab math for both old and new regime on the user's income and deductions. Does not use an LLM for this calculation — it uses the `compute_tax()` function in `shared/tax_utils.py` which has the exact statutory slab rates and is tested. Picks the regime with lower tax and records the saving.
-- **validate node** — checks 12 rules: 80C family cap at ₹1.5L, HRA and 80GG not both claimed, income not exceeding ₹50L (ITR-1 limit), 80TTA and 80TTB not both claimed, TDS cross-check against expected tax, etc. Each violation becomes a flag with severity (error/warning/info) and a plain-English fix suggestion.
-- **score_confidence node** — aggregates confidence across all filled fields. Any field that was not found in the uploaded documents gets confidence 0.3 and is automatically flagged for manual review.
-- **explain node** — generates plain-English explanations for complex fields (HRA calculation, 87A rebate eligibility, regime recommendation reasoning) using an LLM call that tries Groq, then OpenRouter, then OpenAI in order (`shared/llm_client.py`) — see [Architecture](#2-architecture).
+- **fill_form node** — maps every extracted field onto the return schema. Form 16 isn't mandatory — a filer whose income is entirely foreign, property, or capital-gains based still gets a computed return, with a flagged placeholder for any field (like name) that had no other source. Also flags when foreign income is present but residential status wasn't confirmed, or when foreign income is present without an accompanying foreign asset disclosure.
+- **compare_regimes node** — computes tax under the regime the source documents indicate (deterministic slab math, no LLM), then separately computes the other regime purely for a side-by-side comparison display, and reports the lower one as a recommendation.
+- **validate node** — checks required fields are present, exemptions/TDS sanity against gross salary, regime consistency (e.g. flags 80C claimed under the new regime, which is ignored there), house-property loss sign, capital-gains bucket sign, a disclosure warning when non-equity LTCG is taxed flat without checking the pre-23-Jul-2024 indexation election, and gross-vs-taxable income consistency. Each violation becomes a flag with severity (error/warning) and a suggestion.
+- **score_confidence node** — starts at a base score of 0.95 and subtracts 0.3 per validation error and 0.05 per warning, floored at 0.1.
+- **explain node** — builds a structured plain-English summary (gross total income, capital gains by section, foreign income and foreign tax credit, taxable income, total tax liability, TDS, refund/payable, and a regime recommendation when there's a saving) directly from the already-computed numbers. This node is deterministic string formatting, not an LLM call — the LLM is used elsewhere (chat, and the LLM-assisted parsers), not here.
 
-**Step 4 — Form viewer.** The filled form is shown at `/form?session=SESSION_ID` (ITR-1) or `/form-itr2?session=SESSION_ID` (ITR-2) — the router's `form_type` decides which one the upload page navigates to. Every field shows its value, a colour-coded confidence bar (green ≥ 80%, amber ≥ 50%, red below), and the source badge (Form 16 / Bank stmt / Computed / Manual). Validation flags appear as banners at the top. The user can click the edit button on any field, correct the value, and save — which sets that field's confidence to 100% (human verified) and logs it in the audit trail.
+**Step 4 — Form viewer.** The filled form is shown at `/form-itr2?session=SESSION_ID`. Every field shows its value, a colour-coded confidence bar (green ≥ 80%, amber ≥ 50%, red below), and the source badge (Form 16 / Bank stmt / Computed / Manual). Validation flags appear as banners at the top. The user can click the edit button on any field, correct the value, and save — which sets that field's confidence to 100% (human verified) and logs it in the audit trail.
 
 **Step 5 — Chat.** The user can go to `/chat?session=SESSION_ID` and ask any tax question in natural language. The question goes to the RAG service at port 8001, which embeds it, retrieves the 5 most relevant chunks from the FAISS vector store using MMR diversity filtering, reranks them with a cross-encoder, and sends them with the question to the LLM (Groq → OpenRouter → OpenAI fallback chain). The answer is returned with source citations linking back to the exact CBDT page or document (served via `GET /api/pdfs/:filename` for local PDFs). The chat is aware of the user's filled form if they are in a session (it knows their income, regime, and taxable income).
 
-**Step 6 — Export.** The user clicks "Export JSON" to download the completely filled ITR-1 or ITR-2 form as a JSON file, which can be imported into the ITD offline utility or used to pre-fill the online portal.
+**Step 6 — Export.** The user clicks "Export JSON" to download the completely filled return as a JSON file, which can be imported into the ITD offline utility or used to pre-fill the online portal.
 
 ---
 
@@ -54,8 +50,7 @@ Here is the complete user flow from opening the browser to getting a filled ITR-
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Frontend  Next.js · React · Tailwind  :3000                │
-│  /upload  /upload-itr2  /form?session=...  /form-itr2?...   │
-│  /chat?session=...                                           │
+│  /upload-itr2   /form-itr2?session=...   /chat?session=...  │
 └──────────────────────┬──────────────────────────────────────┘
                        │ HTTP
 ┌──────────────────────▼──────────────────────────────────────┐
@@ -69,26 +64,28 @@ Here is the complete user flow from opening the browser to getting a filled ITR-
 │ :8002              ││  :8001          ││ :8000               │
 │                    ││                 ││                     │
 │ 13 parsers:        ││  FAISS index    ││  graph/router.py    │
-│ form16, bank_stmt, ││  MMR retrieval  ││  picks ITR-1 or      │
-│ ais, form26as, tis,││  cross-encoder  ││  ITR-2, then runs a  │
-│ capital_gains,     ││                 ││  5-node LangGraph    │
-│ property, foreign_ ││                 ││  pipeline:           │
-│ income, health/    ││                 ││  fill_form           │
-│ life_insurance,    ││                 ││  compare_regimes     │
-│ home_loan, other_  ││                 ││  validate            │
-│ sources_income,    ││                 ││  score_confidence    │
-│ residential_status ││                 ││  explain             │
+│ form16, bank_stmt, ││  MMR retrieval  ││  screens Non-        │
+│ ais, form26as, tis,││  cross-encoder  ││  Resident/RNOR out   │
+│ capital_gains,     ││                 ││  of scope, then a    │
+│ property, foreign_ ││                 ││  5-node LangGraph    │
+│ income, health/    ││                 ││  pipeline:           │
+│ life_insurance,    ││                 ││  fill_form           │
+│ home_loan, other_  ││                 ││  compare_regimes     │
+│ sources_income,    ││                 ││  validate            │
+│ residential_status ││                 ││  score_confidence    │
+│                    ││                 ││  explain             │
 └────────┬───────────┘└──────┬──────────┘└──────┬───────────────┘
          │                   │                  │
          └───────────────────┴──────────────────┴──────────────┐
                                                                  │
 ┌────────────────────────────────────────────────────────────▼─┐
 │  Shared Python  (imported by all 3 Python services)           │
-│  shared/itr1_schema.py, itr2_schema.py — Pydantic models      │
-│  shared/tax_utils.py, tax_utils_itr2.py — slab/regime math    │
-│  shared/tax_engine/  — shared primitives (capital gains,      │
-│    foreign income aggregation, FTC) used by both regimes      │
-│  shared/validator.py, validator_itr2.py — cross-field checks  │
+│  shared/itr2_schema.py — Pydantic models for the full return  │
+│  shared/tax_utils_itr2.py — slab/regime math, capital gains,  │
+│    foreign tax credit                                         │
+│  shared/tax_engine/  — config-driven primitives (capital      │
+│    gains, foreign income aggregation, FTC), per-AY configs    │
+│  shared/validator_itr2.py — cross-field validation checks     │
 │  shared/llm_client.py — unified LLM client: tries Groq, then  │
 │    OpenRouter, then OpenAI, in that order, per call            │
 └───────────────────────────────────────────────────────────────┘
@@ -105,7 +102,7 @@ Here is the complete user flow from opening the browser to getting a filled ITR-
 - Python for ML (pdfplumber, FAISS, LangChain, sentence-transformers). Node.js for async I/O coordination.
 - AY updates only redeploy the RAG service — no other service touched.
 
-**Why a router instead of one combined graph:** ITR-1 and ITR-2 have different schemas, different validation rules, and different fields entirely (Schedule CG, Schedule FSI). Keeping `itr_graph.py` and `itr2_graph.py` as two independent graphs that neither imports nor branches on the other keeps each pipeline simple and independently testable; `router.py` is the only place that decides which one runs, based on which document types were uploaded.
+**Why a router:** The eligibility router is the single place that screens Non-Resident/RNOR filings out of scope — this codebase only computes returns for Resident and Ordinarily Resident filers — before the pipeline runs, keeping that check out of the pipeline nodes themselves.
 
 **Why a fallback chain instead of one LLM provider:** Groq and OpenRouter both offer free tiers with OpenAI-compatible APIs, so `shared/llm_client.py` tries them first and only falls back to paid OpenAI (`gpt-4o-mini`) if both fail or no key is set — the whole system can run on $0 in API cost for most users.
 
@@ -116,7 +113,7 @@ Here is the complete user flow from opening the browser to getting a filled ITR-
 Every file in the project, what it does, and why it exists.
 
 ```
-itr1-rag-agent/
+TaxMate/
 │
 ├── .env.example                 Configuration template. Copy to .env and fill in.
 ├── docker-compose.yml           Starts all 7 services in correct order with health checks.
@@ -127,8 +124,8 @@ itr1-rag-agent/
 │   ├── scraper.py               Scrapes official/reference websites using headless Playwright +
 │   │                            BS4. Outputs markdown chunks to rag_output/chunks/. Handles
 │   │                            JS-heavy sites (ClearTax is React, incometax.gov.in is Drupal).
-│   ├── build_itr2_kb.py         ITR-2-only ingestion (capital gains, house property, foreign
-│   │                            income sources) → rag_output/itr2/. See §4 for why this is a
+│   ├── build_itr2_kb.py         Ingests capital-gains, house-property, and foreign-income
+│   │                            reference sources → rag_output/itr2/. See §4 for why this is a
 │   │                            separate script rather than scraper.py.
 │   ├── embedder.py              Takes all_chunks.jsonl → embeds → saves FAISS index.
 │   │                            Two backends: HuggingFace BGE (free) or OpenAI (better quality).
@@ -142,55 +139,57 @@ itr1-rag-agent/
 │   │                            512 tokens, writes to rag_output/chunks/. Run AFTER scraper.py,
 │   │                            then run embedder.py to include PDFs in FAISS. Supports
 │   │                            --form-type itr2 for PDFs dropped in pdfs/itr2/.
-│   ├── itr_form_schema_loader.py Reads the official ITR JSON schema + Excel field map you
+│   ├── itr_form_schema_loader.py Reads the official ITD JSON schema + Excel field map you
 │   │                            downloaded from the ITD utility. Maps every official field name
-│   │                            to the schema dot-path. Outputs field_map.json.
+│   │                            to the internal schema dot-path. Outputs field_map.json.
 │   ├── verify_itr2_retrieval.py Sanity-checks the built ITR-2 index against known-answer queries.
 │   ├── build_page_map.py, patch_ay_labels.py, patch_meta.py
 │   │                            One-off maintenance scripts used when CBDT page structure or
 │   │                            AY labelling in existing chunk metadata needed correcting
 │   │                            in place, without a full re-scrape.
-│   ├── pdfs/                    PUT YOUR DOWNLOADED PDFS HERE (pdfs/itr2/ for ITR-2-only PDFs).
-│   │   ├── itr1_instructions_AY2026-27.pdf
+│   ├── pdfs/                    PUT YOUR DOWNLOADED PDFS HERE (pdfs/itr2/ for capital-gains/
+│   │   │                        house-property/foreign-income-specific PDFs).
+│   │   ├── itr_instructions_AY2026-27.pdf
 │   │   ├── circular_03_2025.pdf
 │   │   ├── income_tax_act_sections.pdf
 │   │   ├── income_tax_rules_2026.pdf
 │   │   └── ... (any other PDFs)
 │   ├── form_files/              PUT YOUR DOWNLOADED FORM FILES HERE.
-│   │   ├── itr1_schema_AY2026-27.json   (JSON schema from ITD utility)
-│   │   └── itr1_fields_AY2026-27.xlsx  (Excel field map)
+│   │   ├── itr_schema_AY2026-27.json   (official JSON schema from ITD utility)
+│   │   └── itr_fields_AY2026-27.xlsx  (Excel field map)
 │   └── vector_store/             FAISS indexes, one namespace per AY (+ "_ITR2" suffix for the
-│                                 ITR-2-only namespace). Built by embedder.py — see §4.
+│                                 capital-gains/foreign-income-only namespace). See §4.
 │
 ├── shared/                      Python package imported by all 3 Python services.
 │   ├── __init__.py
-│   ├── itr1_schema.py           BACKBONE OF THE ITR-1 PIPELINE. Pydantic models for:
-│   │                            PersonalInfo, SalaryIncome (Schedule S), HousePropertyIncome
-│   │                            (Schedule HP), OtherSourcesIncome (Schedule OS), Deductions
-│   │                            (Chapter VI-A with all sections), TDSEntry (Schedule TDS1),
-│   │                            TaxComputation, FieldConfidence, ValidationFlag, ITR1Form.
-│   ├── itr2_schema.py           Same role as itr1_schema.py but for ITR-2: adds Schedule CG
-│   │                            (capital gains), multi-property Schedule HP, Schedule FSI/FA
-│   │                            (foreign source income / assets), ITR2Form.
-│   ├── tax_utils.py             All statutory tax math for the ITR-1 pipeline. Contains:
-│   │                            - AY_CONFIG dict with exact slab rates, rebate limits, cess rate,
-│   │                              surcharge slabs for both regimes
-│   │                            - compute_tax() — progressive slab calculation
-│   │                            - compare_regimes() — full old vs new comparison with rupee saving
-│   │                            - compute_hra_exemption() — 3-component HRA minimum
-│   │                            - enforce_deduction_limits() — applies all statutory caps
+│   ├── itr2_schema.py           BACKBONE OF THE PROJECT. Pydantic models for the full return:
+│   │                            PersonalInfo, SalaryIncome (Schedule S), multi-property
+│   │                            HousePropertyIncome (Schedule HP), OtherSourcesIncome
+│   │                            (Schedule OS), Deductions (Chapter VI-A with all sections),
+│   │                            TDSEntry, TaxComputation, FieldConfidence, ValidationFlag,
+│   │                            plus CapitalGains (Schedule CG) and ForeignIncomeEntry /
+│   │                            ForeignAssetEntry (Schedule FSI/FA) — all rolled into ITR2Form.
+│   ├── tax_utils_itr2.py        All statutory tax math. Contains:
+│   │                            - AY-specific slab rates, rebate limits, cess rate, surcharge
+│   │                              slabs for both regimes, driven by shared/tax_engine's configs
+│   │                            - compute_tax_from_engine_itr2() — runs the config-driven
+│   │                              engine and reshapes the result, including capital_gains and
+│   │                              house_property_loss_carried_forward
+│   │                            - Capital gains rates (Sec 111A/112/112A), Schedule FSI
+│   │                              foreign tax credit math
 │   │                            All functions are pure Python, no LLM, deterministic, tested.
-│   ├── tax_utils_itr2.py        Same role as tax_utils.py, extended for ITR-2: capital gains
-│   │                            rates (Sec 111A/112/112A), Schedule FSI foreign tax credit math.
-│   ├── tax_engine/               Primitives shared by both tax_utils modules rather than
-│   │   ├── interpreter.py       duplicated — capital gains computation, foreign income
-│   │   ├── primitives.py        aggregation, foreign tax credit application — plus per-AY
-│   │   └── configs/             config so slab/rate changes for a new AY live in one place.
-│   ├── validator.py             Cross-field validation rules for the ITR-1 pipeline (the 12
-│   │                            checks described in §5's validate node).
-│   ├── validator_itr2.py        Equivalent cross-field validation for the ITR-2 pipeline.
+│   ├── tax_engine/               Config-driven computation primitives:
+│   │   ├── interpreter.py       capital gains computation, foreign income aggregation,
+│   │   ├── primitives.py        foreign tax credit application — plus per-AY JSON configs
+│   │   └── configs/             so slab/rate changes for a new AY live in one place.
+│   ├── validator_itr2.py        Cross-field validation: required fields present, exemptions/
+│   │                            TDS sanity vs gross salary, regime consistency (flags 80C
+│   │                            claimed under the new regime), house-property loss sign,
+│   │                            capital-gains bucket sign checks, a disclosure warning for
+│   │                            non-equity LTCG taxed without checking the pre-23-Jul-2024
+│   │                            indexation election, and gross-vs-taxable income consistency.
 │   └── llm_client.py            Unified LLM client used by every LLM call in the codebase
-│                                (explain node, LLM-assisted parsers, RAG answer generation).
+│                                (LLM-assisted parsers, RAG answer generation).
 │                                Tries Groq (llama-3.3-70b, free tier) → OpenRouter (free-tier
 │                                llama/deepseek models) → OpenAI (gpt-4o-mini, paid) in order,
 │                                stopping at the first provider with a working key. See §2.
@@ -247,17 +246,17 @@ itr1-rag-agent/
 │       │                        layout even though they cover overlapping data.
 │       ├── tis.py               Taxpayer Information Summary parser — the "Accepted by
 │       │                        Taxpayer" reconciled view that sits alongside AIS.
-│       ├── capital_gains.py     ITR-2-only. LLM-assisted extraction from broker/CAMS capital
-│       │                        gains statements — accepts PDF and Excel (incl. legacy .xls,
-│       │                        the common format for older broker exports). Classifies each
+│       ├── capital_gains.py     LLM-assisted extraction from broker/CAMS capital gains
+│       │                        statements — accepts PDF and Excel (incl. legacy .xls, the
+│       │                        common format for older broker exports). Classifies each
 │       │                        realized gain under Sec 111A (equity STCG) / 112 (non-equity
 │       │                        LTCG) / 112A (equity LTCG).
-│       ├── property.py          ITR-2-only. Extracts Schedule HP fields (annual value,
-│       │                        municipal tax, rent received, tenant details) for self-occupied,
-│       │                        let-out, and deemed-let-out properties — including multiple
-│       │                        properties in one filing.
-│       ├── foreign_income.py    ITR-2-only. Extracts Schedule FSI/FA fields (foreign income,
-│       │                        foreign assets, Form 67 foreign tax credit) for Resident filers.
+│       ├── property.py          Extracts Schedule HP fields (annual value, municipal tax, rent
+│       │                        received, tenant details) for self-occupied, let-out, and
+│       │                        deemed-let-out properties — including multiple properties in
+│       │                        one filing.
+│       ├── foreign_income.py    Extracts Schedule FSI/FA fields (foreign income, foreign
+│       │                        assets, Form 67 foreign tax credit) for Resident filers.
 │       ├── health_insurance.py  Extracts premium paid for Sec 80D.
 │       ├── life_insurance.py    Extracts premium paid for Sec 80C.
 │       ├── home_loan.py         Extracts principal repaid (80C) and interest paid (Sec 24b /
@@ -283,48 +282,52 @@ itr1-rag-agent/
 │                                ms-marco-MiniLM. shared/llm_client.py generates the final
 │                                answer from retrieved context (Groq → OpenRouter → OpenAI).
 │
-├── agent-orchestrator/          Python microservice. Runs the LangGraph ITR-1 pipeline.
+├── agent-orchestrator/          Python microservice. Runs the LangGraph tax computation
+│   │                            pipeline.
 │   ├── __init__.py
 │   ├── Dockerfile
 │   ├── requirements.txt         fastapi, langgraph, langchain, langchain-openai, httpx
 │   ├── main.py                  FastAPI app. Endpoints:
-│   │                            POST /pipeline/run    — run full 5-node pipeline
+│   │                            POST /pipeline/run    — screens eligibility via
+│   │                                                     graph/router.py (Non-Resident/RNOR
+│   │                                                     filings are redirected out of scope),
+│   │                                                     then runs the pipeline
 │   │                            GET  /pipeline/session/{id} — get filled form for session
 │   │                            POST /pipeline/update-field — manual field correction
 │   │                            POST /chat/query      — Q&A (proxies to RAG service)
 │   │                            GET  /pipeline/export/{id} — download filled form JSON
 │   │                            GET  /health
-│   │                            /pipeline/run dispatches through graph/router.py and returns a
-│                            form_type field plus either itr1_form or itr2_form.
-│                            Sessions stored in-memory dict (replace with Redis in prod).
+│   │                            Sessions stored in-memory dict (replace with Redis in prod).
 │   └── graph/
 │       ├── __init__.py
-│       ├── router.py            Eligibility router — the ONLY place that decides (a) whether a
-│       │                        filing is out of scope entirely (currently: NR/RNOR residential
-│       │                        status, computed from residential_status.py's extraction) and,
-│       │                        if not, (b) whether it goes through itr_graph.py or
-│       │                        itr2_graph.py, based purely on which document types were
-│       │                        uploaded (capital gains / 3+ properties / foreign income →
-│       │                        ITR-2). Neither graph imports or branches on the other.
-│       ├── itr_graph.py         ITR-1 pipeline. LangGraph state machine with 5 nodes.
-│       │                        AgentState TypedDict holds everything across nodes.
-│       │                        node_fill_form: maps parsed docs → ITR-1 fields, assigns
-│       │                          confidence scores, creates audit trail entries.
-│       │                        node_compare_regimes: calls compare_regimes() from tax_utils,
-│       │                          fills tax_computation section, records regime recommendation.
-│       │                        node_validate: validation checks, creates ValidationFlag
-│       │                          objects with severity and fix suggestion for each issue.
-│       │                        node_score_confidence: ensures critical fields have scores,
-│       │                          marks missing fields as flagged.
-│       │                        node_explain: LLM call generates plain-English explanation
-│       │                          for HRA exemption, 87A rebate, regime recommendation.
-│       │                        run_itr_pipeline(): convenience function that builds and
-│       │                          invokes the compiled graph with an initial state.
-│       └── itr2_graph.py        ITR-2 pipeline. Same 5-node shape as itr_graph.py (fill_form,
-│                                compare_regimes, validate, score_confidence, explain), built
-│                                against itr2_schema.py / tax_utils_itr2.py / validator_itr2.py
-│                                instead — adds capital gains (Schedule CG) and foreign income
-│                                (Schedule FSI, foreign tax credit) to what gets filled/validated.
+│       ├── router.py            Eligibility router — the ONLY place that decides whether a
+│       │                        filing is out of scope entirely (Non-Resident/RNOR residential
+│       │                        status, computed from residential_status.py's extraction).
+│       │                        In-scope filings proceed to the pipeline below.
+│       └── itr2_graph.py        THE HEART OF THE PROJECT. LangGraph state machine with 5 nodes.
+│                                AgentState TypedDict holds everything across nodes.
+│                                node_fill_form: maps parsed docs onto the return schema — Form
+│                                  16 isn't mandatory (a filer with only foreign/property/
+│                                  capital-gains income still gets a computed return, with a
+│                                  flagged placeholder for any field with no other source);
+│                                  flags foreign income lacking a confirmed residential status
+│                                  or an accompanying foreign asset disclosure.
+│                                node_compare_regimes: computes tax under the regime the source
+│                                  documents indicate, then separately computes the other regime
+│                                  purely for a side-by-side comparison, reporting the lower one
+│                                  as a recommendation.
+│                                node_validate: runs the cross-field checks described in
+│                                  validator_itr2.py above, creates ValidationFlag objects with
+│                                  severity and a suggestion for each issue.
+│                                node_score_confidence: base score 0.95, − 0.3 per error,
+│                                  − 0.05 per warning, floored at 0.1.
+│                                node_explain: builds a structured plain-English summary
+│                                  (income, capital gains by section, foreign income + FTC, tax
+│                                  liability, refund/payable, regime recommendation) directly
+│                                  from the computed numbers — deterministic string formatting,
+│                                  not an LLM call.
+│                                run_itr2_pipeline(): convenience function that builds and
+│                                  invokes the compiled graph with an initial state.
 │
 ├── api-gateway/                 Node.js microservice. The single entry point for the frontend.
 │   ├── Dockerfile
@@ -345,7 +348,7 @@ itr1-rag-agent/
 │                                JWT auth middleware (SKIP_AUTH=true for local dev).
 │                                Rate limiting: 100 req/15min general, 20 req/15min for uploads.
 │
-├── frontend/                    Next.js 14 / React / Tailwind. Five route folders.
+├── frontend/                    Next.js 14 / React / Tailwind.
 │   ├── Dockerfile               Multi-stage: build → standalone output
 │   ├── package.json             next, react, tailwindcss, typescript
 │   ├── next.config.js           output: standalone (for Docker)
@@ -354,37 +357,26 @@ itr1-rag-agent/
 │   ├── tsconfig.json
 │   └── src/app/
 │       ├── layout.tsx           Root layout wrapping all pages. Sets page title and metadata.
-│       ├── page.tsx             Root route — immediately redirects to /upload.
 │       ├── globals.css          Tailwind base imports + body font.
-│       ├── upload/
-│       │   └── page.tsx         ITR-1 document upload UI. DropZone components for Form 16 +
-│       │                        bank statements. Each drop zone calls /api/upload/:docType,
-│       │                        shows parse confidence and warnings on the returned FileCard.
-│       │                        "Fill My ITR-1" button calls /api/pipeline/run with all parsed
-│       │                        docs, then navigates to /form or /form-itr2 depending on which
-│       │                        form_type the router picked (see graph/router.py in §3).
 │       ├── upload-itr2/
-│       │   └── page.tsx         ITR-2 document upload UI — same DropZone pattern as upload/,
-│       │                        extended with drop zones for capital gains statements,
-│       │                        property/home loan certificates, foreign income, health/life
-│       │                        insurance, other-sources income, residential status, and a
-│       │                        reference-document slot for supporting context. Also routes to
-│       │                        /form or /form-itr2 based on the router's form_type result —
-│       │                        a filer who only uploads salary docs here still lands on the
-│       │                        plain ITR-1 form viewer.
-│       ├── form/
-│       │   └── page.tsx         ITR-1 filled form viewer. Loads session from /api/pipeline/:id.
-│       │                        Shows every ITR-1 field grouped into section cards
-│       │                        (Salary, HP, Other Sources, Deductions, Tax Computation).
-│       │                        Each FieldRow shows: label, explanation, confidence bar, source
-│       │                        badge, value, edit button. Validation flags at top as banners.
-│       │                        Regime recommendation card in green. EditModal for any field
-│       │                        (calls /api/pipeline/update-field). Wrapped in Suspense.
+│       │   └── page.tsx         Document upload UI. DropZone components for Form 16, bank
+│       │                        statements, capital gains statements, property/home loan
+│       │                        certificates, foreign income, health/life insurance,
+│       │                        other-sources income, residential status, and a
+│       │                        reference-document slot for supporting context. Each drop zone
+│       │                        calls /api/upload/:docType, shows parse confidence and
+│       │                        warnings on the returned FileCard. "Fill My Return" button
+│       │                        calls /api/pipeline/run with all parsed docs, then navigates
+│       │                        to /form-itr2?session=SESSION_ID.
 │       ├── form-itr2/
-│       │   └── page.tsx         ITR-2 filled form viewer — same FieldRow/EditModal/validation-
-│       │                        banner pattern as form/, with section cards for Schedule CG
-│       │                        (capital gains) and Schedule FSI/FA (foreign income/assets)
-│       │                        added on top of the ITR-1 sections.
+│       │   └── page.tsx         Filled form viewer. Loads session from /api/pipeline/:id.
+│       │                        Shows every field grouped into section cards (Salary, House
+│       │                        Property, Other Sources, Deductions, Capital Gains, Foreign
+│       │                        Income, Tax Computation). Each FieldRow shows: label,
+│       │                        explanation, confidence bar, source badge, value, edit button.
+│       │                        Validation flags at top as banners. Regime recommendation card
+│       │                        in green. EditModal for any field (calls
+│       │                        /api/pipeline/update-field). Wrapped in Suspense.
 │       └── chat/
 │           └── page.tsx         Q&A chat interface. Calls /api/chat with the question.
 │                                Shows RegimeCard (old vs new tax + saving) if session active.
@@ -392,43 +384,18 @@ itr1-rag-agent/
 │                                Answers show with source citation links. Auto-scroll.
 │                                Shift+Enter for newline, Enter to send. Wrapped in Suspense.
 │
-└── tests/                       Pytest test suite (8 files, 114 test functions total).
+└── tests/                       Pytest test suite (6 documented files, 56 test functions).
     ├── __init__.py
     ├── conftest.py              Shared fixtures: sample Form 16 data, sample bank data.
     │                            Adds all service directories to sys.path.
-    ├── test_tax_logic.py        38 tests for shared/tax_utils.py and shared/itr1_schema.py:
-    │                            - Tax slab computation (both regimes)
-    │                            - 87A rebate boundary conditions (exactly ₹7L, ₹7L+₹1)
-    │                            - Cess calculation (exactly 4%)
-    │                            - New regime slab correctness (₹90,000 at ₹12L income)
-    │                            - Old regime slab correctness (₹1,12,500 at ₹10L income)
-    │                            - Surcharge trigger at ₹50L
-    │                            - Regime comparison (when old is better, when new is better)
-    │                            - Refund computation
-    │                            - HRA 3-component minimum (metro/non-metro, zero rent, etc.)
-    │                            - Deduction caps (80C ₹1.5L, 80CCD(1B) ₹50k, 80TTA ₹10k)
-    │                            - HP interest cap at ₹2L for self-occupied
-    │                            - New regime deductions zeroed correctly
-    │                            All 38 pass.
-    ├── test_pipeline.py         20 tests for the ITR-1 LangGraph pipeline (mocked LLM for the
-    │                            explain node):
-    │                            - Each node tested in isolation (fill_form, compare_regimes,
-    │                              validate, score_confidence, explain)
-    │                            - fill_form: gross salary, PAN, taxable salary, bank interest,
-    │                              80TTA, confidence scores, audit trail, TDS entry
-    │                            - compare_regimes: both taxes computed, recommended is lower
-    │                            - validate: no errors for valid input, flags missing Form 16,
-    │                              flags income > ₹50L
-    │                            - score_confidence: critical fields scored, missing fields flagged
-    │                            - Full integration test with mocked LLM
-    ├── test_tax_engine.py       7 tests for shared/tax_engine — the primitives shared between
-    │                            the ITR-1 and ITR-2 tax math.
+    ├── test_tax_engine.py       7 tests for shared/tax_engine — the config-driven computation
+    │                            primitives.
     ├── test_tax_engine_itr2.py  9 tests for tax_utils_itr2.py — capital gains rates, foreign
     │                            tax credit application.
     ├── test_capital_gains_parser.py  13 tests for parsers/capital_gains.py — Sec 111A/112/112A
     │                            classification, Excel and legacy .xls input handling.
     ├── test_validator_itr2.py   3 tests for shared/validator_itr2.py.
-    ├── test_router.py           17 tests for graph/router.py — ITR-1 vs ITR-2 selection,
+    ├── test_router.py           17 tests for graph/router.py — eligibility screening,
     │                            NR/RNOR out-of-scope detection, foreign-currency-signal
     │                            reclassification.
     └── test_rag_verification.py  7 tests sanity-checking retrieval quality against known-
@@ -447,26 +414,23 @@ The FAISS vector store contains two types of content:
 
 | URL | What it contains | Why it matters for RAG |
 |-----|-----------------|------------------------|
-| incometax.gov.in/help/how-to-file-itr1-form-sahaj | Step-by-step ITR-1 filing guide | Field-level explanations for every section |
-| incometax.gov.in/help/e-filing-itr1-form-sahaj-faq | Official FAQs on eligibility, deductions, regime | Ideal Q&A chunks |
 | incometax.gov.in/help/individual/return-applicable-1 | Slab tables, surcharge rules, 87A rebate numbers | Exact numbers for regime comparison |
 | cleartax.in/s/80c-80-deductions | Plain-English 80C guide | Edge case coverage |
-| cleartax.in/s/itr1 | Complete ITR-1 guide | Broader coverage |
 
 **2. PDF content (from pdf_ingester.py)**
 
 Your downloaded PDFs go in `knowledge-base/pdfs/`. The ingester auto-detects what each PDF is based on the filename using regex patterns. Recommended files:
 
 ```
-itr1_instructions_AY2024-25.pdf   ← CBDT instructions booklet (most important)
-circular_03_2025.pdf               ← CBDT Circular 03/2025 (TDS on salary FY 2024-25)
-income_tax_act_sections.pdf        ← IT Act: Sec 80C, 80D, 87A, 115BAC, 139(1), etc.
-finance_act_2023.pdf               ← Budget 2023 changes
+itr_instructions_AY2026-27.pdf     ← CBDT instructions booklet (most important)
+circular_03_2025.pdf               ← CBDT Circular 03/2025 (TDS on salary)
+income_tax_act_sections.pdf        ← IT Act: Sec 80C, 80D, 87A, 111A, 112, 112A, 115BAC, etc.
+income_tax_rules_2026.pdf          ← Income Tax Rules
 ```
 
 **3. Official form files (from itr_form_schema_loader.py)**
 
-Your downloaded ITR-1 JSON schema and Excel field map go in `knowledge-base/form_files/`. The loader builds `field_map.json` which maps every official ITD field name (e.g. `Section80C`) to the schema path (e.g. `deductions.sec_80c`).
+Your downloaded official JSON schema and Excel field map go in `knowledge-base/form_files/`. The loader builds `field_map.json` which maps every official ITD field name (e.g. `Section80C`) to the internal schema path (e.g. `deductions.sec_80c`).
 
 ### How chunks are created
 
@@ -497,9 +461,9 @@ When new AY drops: ingest new PDFs → run embedder with `--ay <AY>` → only th
 
 ### ITR-2 namespace (capital gains + house property)
 
-Same pipeline, a separate namespace: `AY2026-27_ITR2` (via `shared/tax_engine`'s `itr2_ay()` suffix convention — `{ay}_ITR2`, not a new naming scheme). Everything under this namespace stays scoped to the ITR-2-only sections — Schedule CG (Sec 111A/112/112A) and Schedule HP (multiple house properties) — since ITR-1 topics are already covered by the base namespace above.
+Same pipeline, a separate namespace: `AY2026-27_ITR2` (via `shared/tax_engine`'s `itr2_ay()` suffix convention — `{ay}_ITR2`, not a new naming scheme). Everything under this namespace stays scoped to capital gains (Sec 111A/112/112A) and multi-property house-property topics — the base namespace above covers the rest (salary, deductions, general filing procedure).
 
-Ingestion is `knowledge-base/build_itr2_kb.py` rather than `scraper.py`, because two of its six sources need a different fetch path: incometax.gov.in is still server-rendered (plain `curl` + BeautifulSoup, same as ITR-1), but cleartax.in's capital-gains/house-property articles turned out to be a client-rendered Next.js SPA with no article content in the raw HTML at all — confirmed by inspection, not assumed. Their content is captured verbatim in the script instead (see its module docstring for the rationale, the same workaround `manual_fallback.py` already documents for anti-bot-blocked pages).
+Ingestion is `knowledge-base/build_itr2_kb.py` rather than `scraper.py`, because two of its six sources need a different fetch path: incometax.gov.in is still server-rendered (plain `curl` + BeautifulSoup, same as the base scraper), but cleartax.in's capital-gains/house-property articles turned out to be a client-rendered Next.js SPA with no article content in the raw HTML at all — confirmed by inspection, not assumed. Their content is captured verbatim in the script instead (see its module docstring for the rationale, the same workaround `manual_fallback.py` already documents for anti-bot-blocked pages).
 
 ```
 knowledge-base/build_itr2_kb.py    → rag_output/itr2/{raw,chunks,combined}/all_chunks.jsonl
@@ -524,77 +488,81 @@ Rebuild from scratch: `python build_itr2_kb.py && python embedder.py --backend h
 
 ## 5. The agent pipeline
 
-The LangGraph pipeline in `agent-orchestrator/graph/itr_graph.py` is a state machine. Every node receives the full `AgentState` dict and returns only what it changes. LangGraph merges the return into the state automatically.
+The LangGraph pipeline in `agent-orchestrator/graph/itr2_graph.py` is a state machine. Every node receives the full `AgentState` dict and returns only what it changes. LangGraph merges the return into the state automatically.
 
 ```
-Parsed documents (Form 16 JSON + bank statement JSON)
+Parsed documents (Form 16, bank statement, capital gains, property,
+foreign income, insurance, and other-sources JSON)
         │
         ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Node 1: fill_form                                            │
 │                                                              │
-│  For each document in raw_documents:                         │
-│    if form16: extract salary, HRA, TDS, deductions          │
-│    if bank_statement: extract interest income                │
-│  Map every extracted value to itr1_schema.py path           │
-│  Assign confidence (0–1) and source citation to each field   │
-│  Compute derived values (net salary, 80TTA from interest)    │
-│  Build TDSEntry objects for Schedule TDS1                    │
-│  Compute gross total income                                  │
+│  Form 16 optional — if absent but other income docs exist,   │
+│    a placeholder name/regime/TDS is used and flagged          │
+│  Merge capital gains / property / foreign income documents    │
+│    onto the return schema                                     │
+│  If foreign income present without confirmed residential      │
+│    status, or without a foreign asset disclosure → warn       │
+│  Assign confidence (0–1) and source citation to each field    │
+│  Compute derived values (net salary, 80TTA from interest)     │
+│  Build TDSEntry objects                                       │
+│  Compute gross total income                                   │
 └──────────────────────────┬───────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Node 2: compare_regimes                                      │
 │                                                              │
-│  Collect all old-regime deductions from filled form          │
-│  Call compare_regimes() from tax_utils.py                    │
-│  This runs actual slab math (NOT LLM inference):             │
-│    Old regime: income − deductions → apply old slabs → 87A  │
-│    New regime: income − ₹50,000 std ded → apply new slabs   │
-│  Pick regime with lower total tax                            │
-│  Fill tax_computation section of ITR-1 form                  │
-│  Record: both taxes, saving, reasoning string                │
+│  Compute tax under the regime the source documents indicate  │
+│  (NOT LLM inference — deterministic slab math via             │
+│  compute_tax_from_engine_itr2())                               │
+│  Separately compute the other regime purely for a             │
+│  side-by-side comparison display                              │
+│  Report the lower one as a recommendation                     │
+│  Fill tax_computation section of the return                   │
 └──────────────────────────┬───────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Node 3: validate                                             │
 │                                                              │
-│  12 validation checks:                                       │
-│  [error]   Gross salary is 0 → Form 16 not parsed            │
-│  [error]   Income > ₹50L → ITR-1 not applicable             │
-│  [error]   HRA + 80GG both claimed → mutually exclusive      │
-│  [error]   80TTA + 80TTB both claimed → only one allowed     │
-│  [warning] Standard deduction is 0 when salary > 0          │
-│  [warning] 80C family total > ₹1.5L                         │
-│  [info]    Large refund (TDS > 1.5× tax) → verify from AIS  │
-│  Each flag has: field, severity, message, suggestion         │
+│  Required fields present (gross salary, standard deduction,  │
+│    tax regime, TDS)                                          │
+│  Exemptions vs gross salary / TDS vs salary sanity            │
+│  Regime consistency (80C claimed under new regime → warn)     │
+│  House-property loss carried forward can't be negative        │
+│  Capital gains buckets can't be negative                      │
+│  Non-equity LTCG taxed flat 12.5% without checking the        │
+│    pre-23-Jul-2024 indexation election → disclosure warning   │
+│  Gross total income vs taxable income consistency              │
+│  Each flag has: field, severity, message, suggestion          │
 └──────────────────────────┬───────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Node 4: score_confidence                                     │
 │                                                              │
-│  Ensure all critical fields have a confidence score          │
-│  Fields not found in documents → confidence 0.3, flagged     │
-│  Compute average confidence across all fields                │
+│  Base score 0.95                                              │
+│  − 0.3 per validation error, − 0.05 per warning                │
+│  Floored at 0.1                                                │
 └──────────────────────────┬───────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────┐
 │ Node 5: explain                                              │
 │                                                              │
-│  LLM call (Groq → OpenRouter → OpenAI) generates plain-      │
-│  English explanations for:                                   │
-│  - Regime recommendation ("New regime saves ₹X because...")  │
-│  - 87A rebate (if applicable)                                │
-│  - HRA exemption calculation                                 │
-│  Does NOT recompute numbers — uses numbers from state        │
+│  Deterministic template — NOT an LLM call:                   │
+│  - Gross total income, house property loss carried forward   │
+│  - Capital gains by section (111A / 112A / 112) + CG tax      │
+│  - Foreign income (Schedule FSI) + foreign tax credit claimed │
+│  - Taxable income, total tax liability                        │
+│  - TDS deducted, refund due or tax payable                    │
+│  - Regime recommendation with rupee saving, if any             │
 └──────────────────────────┬───────────────────────────────────┘
                            │
                            ▼
-                  Output: filled ITR1Form
+                  Output: filled ITR2Form
                   + confidence_scores dict
                   + validation_flags list
                   + regime_analysis dict
@@ -606,7 +574,7 @@ Parsed documents (Form 16 JSON + bank statement JSON)
 
 ## 6. The document parsers
 
-This section covers the three original ITR-1 parsers in detail. The doc-parser service has grown to 13 parsers total (capital gains, property, foreign income, insurance, home loan, other-sources income, residential status, Form 26AS, TIS) — see the `doc-parser/parsers/` listing in §3 for the full set.
+This section covers three of the document parsers in detail — the ones almost every filing uses (salary, bank interest, tax-credit reconciliation). The doc-parser service has 13 parsers total; see the `doc-parser/parsers/` listing in §3 for the full set (capital gains, property, foreign income, insurance, home loan, other-sources income, residential status, Form 26AS, TIS).
 
 ### Form 16 parser
 
@@ -660,11 +628,11 @@ If these differ by more than ₹100, the validator raises an error. This catches
 # Your downloaded PDFs
 cp ~/Downloads/*.pdf knowledge-base/pdfs/
 
-# Your ITR-1 JSON schema (from ITD utility download)
-cp ~/Downloads/ITR1*.json knowledge-base/form_files/
+# Your official ITR JSON schema (from ITD utility download)
+cp ~/Downloads/*.json knowledge-base/form_files/
 
-# Your ITR-1 Excel field map (if downloaded)
-cp ~/Downloads/ITR1*.xlsx knowledge-base/form_files/
+# Your official ITR Excel field map (if downloaded)
+cp ~/Downloads/*.xlsx knowledge-base/form_files/
 ```
 
 ### Step 2: Configure environment
@@ -691,24 +659,30 @@ pip install -r requirements.txt
 # Install Playwright browser (one-time)
 playwright install chromium
 
-# Scrape the 5 official websites
+# Scrape reference websites
 python scraper.py
+
+# Ingest capital gains / house property / foreign income sources
+python build_itr2_kb.py
 
 # Ingest your downloaded PDFs
 python pdf_ingester.py
 
-# Load the ITR-1 form schema
+# Load the official form schema
 python itr_form_schema_loader.py
 
 # Embed everything into FAISS (free — uses local model, no API cost)
 python embedder.py --backend huggingface
+python embedder.py --backend huggingface --form-type itr2
 ```
 
 After this you will have:
 ```
 vector_store/
-  AY2024-25.faiss
-  AY2024-25.meta.json
+  AY2026-27.faiss
+  AY2026-27.meta.json
+  AY2026-27_ITR2.faiss
+  AY2026-27_ITR2.meta.json
 ```
 
 ### Step 4: Start all services
@@ -727,11 +701,8 @@ First run takes ~5 minutes to build all Docker images.
 ### Step 5: Use the app
 
 ```
-http://localhost:3000              → redirects to /upload
-http://localhost:3000/upload       → ITR-1 document upload
-http://localhost:3000/upload-itr2  → ITR-2 document upload (capital gains, foreign income, etc.)
-http://localhost:3000/form         → ITR-1 filled form viewer (after pipeline runs)
-http://localhost:3000/form-itr2    → ITR-2 filled form viewer
+http://localhost:3000/upload-itr2  → document upload
+http://localhost:3000/form-itr2    → filled form viewer (after pipeline runs)
 http://localhost:3000/chat         → tax Q&A chat
 ```
 
@@ -740,8 +711,8 @@ http://localhost:3000/chat         → tax Q&A chat
 ```bash
 # From project root (no Docker needed — pure Python)
 pip install pydantic pytest
-pytest tests/test_tax_logic.py -v   # 38 tax logic tests
-pytest tests/ -v                    # all 8 files, 114 tests (pipeline/router tests need langgraph installed)
+pytest tests/test_tax_engine_itr2.py -v   # 9 tax engine tests
+pytest tests/ -v                    # all 6 documented files, 56 tests (router/parser tests need langgraph installed)
 ```
 
 ### Checking service health
@@ -758,7 +729,7 @@ Some pages may return 403. Use the fallback:
 ```bash
 python manual_fallback.py --all
 # Or for a specific page that was blocked:
-python manual_fallback.py --from-file saved_page.html --id itr1_faq
+python manual_fallback.py --from-file saved_page.html --id filing_faq
 ```
 Last resort: open the page in Chrome, Ctrl+S to save as HTML, then run the `--from-file` option above.
 
@@ -771,13 +742,13 @@ Last resort: open the page in Chrome, Ctrl+S to save as HTML, then run the `--fr
 | Groq API key (free, recommended) | console.groq.com | `.env` file |
 | OpenRouter API key (free, alternative) | openrouter.ai | `.env` file |
 | OpenAI API key (paid, optional fallback) | platform.openai.com | `.env` file |
-| ITR-1 instructions PDF (AY 2026-27) | incometaxindia.gov.in downloads page | `knowledge-base/pdfs/` |
+| ITR instructions PDF (AY 2026-27) | incometaxindia.gov.in downloads page | `knowledge-base/pdfs/` |
 | CBDT Circular 03/2025 | incometaxindia.gov.in/communications | `knowledge-base/pdfs/` |
 | Income Tax Act relevant sections | indiacode.nic.in or indiankanoon.org | `knowledge-base/pdfs/` |
-| ITR-1 JSON schema | ITD offline utility → extract from ZIP | `knowledge-base/form_files/` |
-| ITR-1 Excel field map | Same ITD utility package | `knowledge-base/form_files/` |
+| Official ITR JSON schema | ITD offline utility → extract from ZIP | `knowledge-base/form_files/` |
+| Official ITR Excel field map | Same ITD utility package | `knowledge-base/form_files/` |
 
-The websites (incometax.gov.in pages, ClearTax) are scraped automatically by `scraper.py` — you don't download those.
+The websites (incometax.gov.in pages, ClearTax) are scraped automatically by `scraper.py` and `build_itr2_kb.py` — you don't download those.
 
 ---
 
@@ -785,29 +756,26 @@ The websites (incometax.gov.in pages, ClearTax) are scraped automatically by `sc
 
 **What it does:**
 - Parses Form 16, bank statements, AIS/26AS/TIS, capital gains statements, property/home loan certificates, insurance premiums, and foreign income disclosures automatically — PDF, Excel, or legacy .xls
-- Routes each filing to ITR-1 or ITR-2 automatically based on the documents uploaded (`graph/router.py`)
-- Fills every field (ITR-1, or ITR-2 including Schedule CG and Schedule FSI) with source citations
+- Screens each filing for eligibility (Non-Resident/RNOR is out of scope) before computing
+- Fills every field — salary, house property (any number of properties), other sources, deductions, capital gains (Schedule CG), foreign income (Schedule FSI) — with source citations
 - Compares old vs new regime with exact statutory math
 - Validates for common errors and eligibility issues
 - Answers tax questions in natural language with CBDT citations
-- Exports a complete filled ITR JSON
+- Exports a complete filled return as JSON
 
 **What it does not do:**
 - It does not submit the return to the income tax portal. The ITD portal does not provide a public API for programmatic filing. You export the JSON and import it into the ITD offline utility, or use it to fill the online portal manually.
-- It does not handle business or professional income — that requires ITR-3/ITR-4.
-- It does not handle Non-Resident or RNOR filers. Residential status changes how every income head is sourced and taxed, not just foreign-currency line items, and this codebase doesn't model that — a document flagged as NR/RNOR is redirected out of scope rather than silently mis-computed (`graph/router.py::is_out_of_scope`).
-- Even for Residents, the router's eligibility check is document-driven, not a full profile questionnaire — it doesn't currently surface agricultural income > ₹5,000, directorship, unlisted equity holdings, TDS u/s 194N, or deferred ESOP tax, all of which affect real ITR-1/ITR-2 eligibility.
+- It does not handle business or professional income.
+- It does not handle Non-Resident or RNOR filers. Residential status changes how every income head is sourced and taxed, not just foreign-currency line items, and this codebase doesn't model that — a filing flagged as NR/RNOR is redirected out of scope rather than silently mis-computed (`graph/router.py::is_out_of_scope`).
+- The eligibility check is document-driven, not a full profile questionnaire — it doesn't currently surface agricultural income > ₹5,000, directorship, unlisted equity holdings, TDS u/s 194N, or deferred ESOP tax, all of which affect real filing eligibility.
+- The non-equity LTCG bucket is always taxed at the flat 12.5% rate without checking the pre-23-Jul-2024 land/building indexation election — surfaced as a disclosure warning rather than blocked, since the flat rate is still lawful for most filers in this bucket.
 - It does not give legal advice. All outputs should be reviewed before filing.
 
-**ITR-1 eligibility (enforced by the router, AY 2026-27 rules):**
-- Salaried income only (one employer)
-- Income from up to two house properties
-- Income from other sources (interest, dividends)
-- A small Sec 112A LTCG (up to the ₹1,25,000 exemption threshold) is still ITR-1-eligible; any Sec 111A STCG, non-equity gain, or 112A LTCG above that threshold requires ITR-2
-- No foreign income or foreign assets (any amount routes to ITR-2, or out of scope for NR/RNOR)
-- Total income must not exceed ₹50 lakh
-
-**ITR-2 covers:** everything ITR-1 does, plus capital gains (Schedule CG), three or more house properties, and foreign income/assets for Resident filers (Schedule FSI, with foreign tax credit).
+**Eligibility (AY 2026-27 rules):**
+- Resident and Ordinarily Resident filers only — Non-Resident/RNOR is out of scope
+- Salary income (Form 16), any number of house properties, other sources (interest, dividends)
+- Capital gains: equity STCG (Sec 111A), equity LTCG (Sec 112A, with the ₹1,25,000 exemption applied), non-equity LTCG/STCG (Sec 112)
+- Foreign income/assets for Resident filers, computed via Schedule FSI with foreign tax credit (Sec 90/91)
 
 ---
 
@@ -819,14 +787,15 @@ The websites (incometax.gov.in pages, ClearTax) are scraped automatically by `sc
 | Why Python for RAG/AI? | LangGraph, pdfplumber, FAISS, sentence-transformers — no equivalent in Node. Would lose 80% of ML tooling |
 | Why Node.js for gateway? | Event-driven non-blocking I/O is the correct tool for orchestrating async calls to multiple Python microservices. Justifiable, not arbitrary |
 | Why FAISS not Pinecone? | FAISS locally (zero cost, full control, fast for demo). Pinecone for production scale (managed, auto-scaling). Shows you know the tradeoff |
-| How do you prevent hallucination? | RAG grounds answers in retrieved context. Confidence scoring flags fields not found in documents. Validator catches tax rule violations. Explain node uses context from state, not free generation |
-| How is it AY-updatable? | Versioned FAISS namespaces (e.g. AY2024-25, AY2026-27, AY2026-27_ITR2). New AY: ingest new PDFs + re-run embedder → only RAG service redeploys. AY_CONFIG dicts in tax_utils.py / tax_utils_itr2.py have one entry per year |
+| How do you prevent hallucination? | RAG grounds answers in retrieved context. Confidence scoring flags fields not found in documents. Validator catches tax rule violations. The explain node is deterministic string formatting off already-computed numbers — no LLM in the loop for the numbers themselves |
+| How is it AY-updatable? | Versioned FAISS namespaces (e.g. AY2024-25, AY2026-27, AY2026-27_ITR2). New AY: ingest new PDFs + re-run embedder → only RAG service redeploys. Per-AY configs live in shared/tax_engine, consumed by tax_utils_itr2.py |
 | What does LangGraph add over raw prompting? | Models the pipeline as a state machine — each node has a defined contract (input state, output state). Resumable, testable in isolation, clear separation of concerns. Visualisable as a graph for viva |
-| Why two graphs (itr_graph.py / itr2_graph.py) instead of one? | ITR-1 and ITR-2 have different schemas and validation rules. Two independent graphs, neither importing or branching on the other, keep each pipeline simple and testable in isolation. `graph/router.py` is the single place that decides which one runs, based on uploaded document types — not a full profile questionnaire |
+| What does the eligibility router actually gate? | Only Non-Resident/RNOR status — everything else (salary, any number of house properties, other sources, capital gains, foreign income for Residents) is computed by the one pipeline. Keeps that one legal distinction out of the pipeline nodes themselves |
+| Is the explain node an LLM call? | No — it's deterministic string formatting off numbers the earlier nodes already computed, so there's no hallucination risk on the figures. The LLM is used elsewhere: RAG chat, and the LLM-assisted document parsers (capital gains, property, foreign income) where layouts vary too much for regex |
 | Why MMR retrieval? | Prevents 5 near-identical chunks being returned for a query. Balances relevance (similarity to query) with diversity (dissimilarity to already-selected chunks). Lambda=0.6 weights relevance higher |
 | What is the cross-encoder for? | Re-ranks the 5 MMR results with a more expensive but accurate model. Bi-encoder (used for FAISS) is fast but approximate. Cross-encoder sees query+document together, much better precision |
 | Why a 3-provider LLM fallback chain? | Groq and OpenRouter both expose free, OpenAI-compatible APIs; `shared/llm_client.py` tries Groq, then OpenRouter, then paid OpenAI (gpt-4o-mini) only if both fail. Keeps the whole system runnable at $0 API cost for most users while still degrading gracefully |
-| How does the tax computation work? | Deterministic Python math in tax_utils.py / tax_utils_itr2.py. NOT LLM inference. Exact statutory slab rates, 4% cess, marginal relief for surcharge, 3-component HRA minimum, Sec 111A/112/112A capital gains rates. Covered by 114 unit tests across 8 test files |
+| How does the tax computation work? | Deterministic Python math — config-driven engine in shared/tax_engine, invoked via tax_utils_itr2.py. NOT LLM inference. Exact statutory slab rates, 4% cess, marginal relief for surcharge, 3-component HRA minimum, Sec 111A/112/112A capital gains rates, Schedule FSI foreign tax credit. Covered by unit tests across several test files (tax_engine, tax_engine_itr2, validator_itr2, capital_gains_parser) |
 | What if Form 16 is scanned/image-based? | Parser returns parse_confidence < 0.5 and warns user. Fix: run `ocrmypdf scanned.pdf output.pdf` before uploading, which adds a text layer |
-| How is the validator different from the form filler? | Validator is a separate LangGraph node that runs after filling, checks cross-field rules (HRA + 80GG, 80TTA + 80TTB, income cap), and produces structured ValidationFlag objects with severities |
+| How is the validator different from the form filler? | Validator is a separate LangGraph node that runs after filling, checks cross-field rules (regime consistency, house-property loss sign, capital-gains sign, income consistency), and produces structured ValidationFlag objects with severities |
 | Why LLM-assisted extraction for capital gains/property/foreign income but regex for Form 16? | Form 16 has a CBDT-mandated TRACES layout that's predictable enough for regex. Broker/CAMS capital gains statements and property/foreign income documents vary far more in layout across issuers, so those parsers use an LLM extraction pass (`parsers/_llm_common.py`) instead, chunking large documents so extraction doesn't fail on long statements |
