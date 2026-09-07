@@ -18,6 +18,8 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import db
+
 app = FastAPI(title="Agent Orchestrator", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -89,6 +91,8 @@ async def run_pipeline(req: RunPipelineRequest):
 
         result["_form_type"] = form_type
         _session_store[session_id] = result
+        if form_type == "itr2":
+            db.save_filing(result["itr2_form"])
         return {
             "success":    True,
             "session_id": session_id,
